@@ -3,7 +3,6 @@ from __future__ import annotations
 import streamlit as st
 
 from infra.app_context import get_authenticator, get_notion_repo
-from infra.cryosphere_cracks import cryosphere_crack_points
 from infra.app_state import (
     ensure_auth,
     ensure_session_context,
@@ -37,7 +36,7 @@ def main() -> None:
     session_title = st.session_state.get("session_title") or "Session active"
     microcopy(session_title)
     cracks_globe_block(
-        cryosphere_crack_points(),
+        [],
         height=260,
         key="home-header-cracks",
         auto_rotate_speed=1.8,

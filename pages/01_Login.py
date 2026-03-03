@@ -19,7 +19,6 @@ from infra.app_state import (
     set_session,
     mint_anon_token,
 )
-from infra.cryosphere_cracks import CRYOSPHERE_CRACKS, cryosphere_crack_points
 from infra.key_codec import split_emoji_symbols
 
 from ui import (
@@ -32,6 +31,7 @@ from ui import (
     display_centered_prompt,
     render_info_block,
 )
+
 
 def main() -> None:
     set_page()
@@ -91,26 +91,38 @@ def main() -> None:
         )
         mint_name = st.text_input("Display name (optional)", key="mint-name")
         if st.button("Mint token", type="secondary", use_container_width=True):
-            with st.status("🔄 Création du jeton en cours...", expanded=True) as status_box:
+            with st.status(
+                "🔄 Création du jeton en cours...", expanded=True
+            ) as status_box:
                 status_box.write("1/5 · Vérification des paramètres.")
                 try:
                     status_box.write("2/5 · Vérification de la session active.")
                     with st.spinner("⏳ Création du jeton sur Notion..."):
-                        status_box.write("3/5 · Génération de la clé et enregistrement Notion.")
+                        status_box.write(
+                            "3/5 · Génération de la clé et enregistrement Notion."
+                        )
                         access_key, _, payload = authenticator.register_user(
                             metadata={"name": mint_name, "role": mint_role}
                         )
-                    status_box.write("4/5 · Construction des projections (emoji, phrase).")
+                    status_box.write(
+                        "4/5 · Construction des projections (emoji, phrase)."
+                    )
                 except Exception as exc:
-                    status_box.update(label="❌ Échec pendant la création du jeton", state="error")
+                    status_box.update(
+                        label="❌ Échec pendant la création du jeton", state="error"
+                    )
                     st.error(f"Minting failed: {exc}")
                 else:
                     st.success("Token minted.")
                     st.code(access_key or "", language="text")
                     emoji_value = str(payload.get("emoji", ""))
                     emoji_symbols = split_emoji_symbols(emoji_value)
-                    suffix_4 = "".join(emoji_symbols[-4:]) if len(emoji_symbols) >= 4 else ""
-                    suffix_6 = "".join(emoji_symbols[-6:]) if len(emoji_symbols) >= 6 else ""
+                    suffix_4 = (
+                        "".join(emoji_symbols[-4:]) if len(emoji_symbols) >= 4 else ""
+                    )
+                    suffix_6 = (
+                        "".join(emoji_symbols[-6:]) if len(emoji_symbols) >= 6 else ""
+                    )
                     st.write("Emoji:", emoji_value or "—")
                     st.write("Phrase:", payload.get("phrase", "—"))
                     st.write("Emoji suffix 4:", suffix_4 or "—")
@@ -124,7 +136,9 @@ def main() -> None:
                         role=str(mint_role or "guest"),
                         title="Carte d'acces",
                     )
-                    filename = f"affranchis-cle-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
+                    filename = (
+                        f"affranchis-cle-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
+                    )
                     st.download_button(
                         "Télécharger la carte PDF",
                         data=pdf_bytes,
@@ -132,7 +146,9 @@ def main() -> None:
                         mime="application/pdf",
                         use_container_width=True,
                     )
-                    status_box.update(label="✅ Jeton prêt et carte générée", state="complete")
+                    status_box.update(
+                        label="✅ Jeton prêt et carte générée", state="complete"
+                    )
 
     if authentication_status:
         st.info(

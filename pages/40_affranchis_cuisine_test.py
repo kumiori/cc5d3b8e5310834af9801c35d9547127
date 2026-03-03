@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,74 @@ from notion_client import Client
 from infra.notion_repo import get_database_schema
 from lib.notion_options import ensure_multiselect_option
 
+
+QUESTION_CATALOG: List[Dict[str, Any]] = [
+    {
+        "key": "diet",
+        "prompt": "Régime",
+        "kind": "constraint",
+        "qtype": "multi",
+        "required": True,
+        "order": 1,
+    },
+    {
+        "key": "allergens",
+        "prompt": "Allergènes",
+        "kind": "constraint",
+        "qtype": "multi",
+        "required": True,
+        "order": 2,
+    },
+    {
+        "key": "hard_no",
+        "prompt": "Ingrédients non",
+        "kind": "constraint",
+        "qtype": "multi",
+        "required": True,
+        "order": 3,
+    },
+    {
+        "key": "spice",
+        "prompt": "Piquant",
+        "kind": "preference",
+        "qtype": "single",
+        "required": True,
+        "order": 4,
+    },
+    {
+        "key": "texture",
+        "prompt": "Texture",
+        "kind": "preference",
+        "qtype": "single",
+        "required": True,
+        "order": 5,
+    },
+    {
+        "key": "cravings",
+        "prompt": "Envies (ressentis)",
+        "kind": "craving",
+        "qtype": "multi",
+        "required": True,
+        "max_select": 2,
+        "order": 6,
+    },
+    {
+        "key": "surprise",
+        "prompt": "Surprise",
+        "kind": "craving",
+        "qtype": "single",
+        "required": False,
+        "order": 7,
+    },
+    {
+        "key": "tonight_note",
+        "prompt": "Un souhait pour ce soir",
+        "kind": "notes",
+        "qtype": "text",
+        "required": False,
+        "order": 8,
+    },
+]
 
 CRAVINGS_OPTIONS = [
     "frais",
@@ -27,9 +96,27 @@ CRAVINGS_OPTIONS = [
     "surprise joueuse",
 ]
 
+TEXTURE_OPTIONS = ["croquant", "crémeux", "mixte"]
+CONDIMENT_CHOICES = ["j'aime", "ok", "j'évite"]
 
+
+# ---------- helpers ----------
 def debug(msg: str) -> None:
     st.markdown(msg)
+
+
+def normalize_label(value: str) -> str:
+    txt = re.sub(r"\s+", " ", (value or "").strip().lower())
+    return txt
+
+
+def now_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def env_required(name: str) -> str:
@@ -37,14 +124,6 @@ def env_required(name: str) -> str:
     if not value:
         raise RuntimeError(f"Variable d'environnement manquante : {name}")
     return value
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def normalize_spaces(value: str) -> str:
-    return " ".join((value or "").strip().split())
 
 
 def resolve_data_source_id(client: Client, db_id: str) -> Optional[str]:
@@ -62,8 +141,30 @@ def query_db(client: Client, db_id: str, **kwargs: Any) -> Dict[str, Any]:
         return client.databases.query(database_id=db_id, **kwargs)
     ds_id = resolve_data_source_id(client, db_id)
     if not ds_id:
-        raise RuntimeError(f"Impossible de requêter la base {db_id} (data_source introuvable).")
+        raise RuntimeError(
+            f"Impossible de requêter la base {db_id} (data_source introuvable)."
+        )
     return client.data_sources.query(data_source_id=ds_id, **kwargs)
+
+
+def query_all(client: Client, db_id: str, **kwargs: Any) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    cursor: Optional[str] = None
+    while True:
+        args = {k: v for k, v in kwargs.items() if v is not None}
+        args.setdefault("page_size", 100)
+        if cursor:
+            args["start_cursor"] = cursor
+        payload = query_db(client, db_id, **args)
+        page_results = payload.get("results", [])
+        if isinstance(page_results, list):
+            results.extend([r for r in page_results if isinstance(r, dict)])
+        if not payload.get("has_more"):
+            break
+        cursor = payload.get("next_cursor")
+        if not cursor:
+            break
+    return results
 
 
 def safe_get_schema(client: Client, db_id: str) -> Dict[str, Any]:
@@ -75,7 +176,9 @@ def safe_get_schema(client: Client, db_id: str) -> Dict[str, Any]:
         raise
 
 
-def find_prop(schema: Dict[str, Any], expected: str, ptype: Optional[str] = None) -> Optional[str]:
+def find_prop(
+    schema: Dict[str, Any], expected: str, ptype: Optional[str] = None
+) -> Optional[str]:
     if expected in schema:
         return expected
     if ptype:
@@ -91,7 +194,11 @@ def rich_text_value(props: Dict[str, Any], prop_name: Optional[str]) -> str:
     value = props.get(prop_name)
     if not isinstance(value, dict) or value.get("type") != "rich_text":
         return ""
-    return "".join(part.get("plain_text", "") for part in value.get("rich_text", []) if isinstance(part, dict))
+    return "".join(
+        part.get("plain_text", "")
+        for part in value.get("rich_text", [])
+        if isinstance(part, dict)
+    )
 
 
 def title_value(props: Dict[str, Any], prop_name: Optional[str]) -> str:
@@ -100,7 +207,11 @@ def title_value(props: Dict[str, Any], prop_name: Optional[str]) -> str:
     value = props.get(prop_name)
     if not isinstance(value, dict) or value.get("type") != "title":
         return ""
-    return "".join(part.get("plain_text", "") for part in value.get("title", []) if isinstance(part, dict))
+    return "".join(
+        part.get("plain_text", "")
+        for part in value.get("title", [])
+        if isinstance(part, dict)
+    )
 
 
 def select_value(props: Dict[str, Any], prop_name: Optional[str]) -> str:
@@ -109,8 +220,8 @@ def select_value(props: Dict[str, Any], prop_name: Optional[str]) -> str:
     value = props.get(prop_name)
     if not isinstance(value, dict) or value.get("type") != "select":
         return ""
-    select = value.get("select") or {}
-    return str(select.get("name", ""))
+    sel = value.get("select") or {}
+    return str(sel.get("name", ""))
 
 
 def multi_select_values(props: Dict[str, Any], prop_name: Optional[str]) -> List[str]:
@@ -119,17 +230,11 @@ def multi_select_values(props: Dict[str, Any], prop_name: Optional[str]) -> List
     value = props.get(prop_name)
     if not isinstance(value, dict) or value.get("type") != "multi_select":
         return []
-    return [str(opt.get("name", "")) for opt in value.get("multi_select", []) if isinstance(opt, dict) and opt.get("name")]
-
-
-def date_start(props: Dict[str, Any], prop_name: Optional[str]) -> str:
-    if not prop_name:
-        return ""
-    value = props.get(prop_name)
-    if not isinstance(value, dict) or value.get("type") != "date":
-        return ""
-    date_obj = value.get("date") or {}
-    return str(date_obj.get("start", ""))
+    return [
+        str(opt.get("name", ""))
+        for opt in value.get("multi_select", [])
+        if isinstance(opt, dict) and opt.get("name")
+    ]
 
 
 def relation_ids(props: Dict[str, Any], prop_name: Optional[str]) -> List[str]:
@@ -138,44 +243,200 @@ def relation_ids(props: Dict[str, Any], prop_name: Optional[str]) -> List[str]:
     value = props.get(prop_name)
     if not isinstance(value, dict) or value.get("type") != "relation":
         return []
-    return [str(item.get("id")) for item in value.get("relation", []) if isinstance(item, dict) and item.get("id")]
+    return [
+        str(item.get("id"))
+        for item in value.get("relation", [])
+        if isinstance(item, dict) and item.get("id")
+    ]
 
 
-def extract_multi_options(schema: Dict[str, Any], prop_name: str, fallback: List[str]) -> List[str]:
+def to_json_text(value: Any) -> str:
+    if isinstance(value, (dict, list, int, float, bool)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value or "")
+
+
+def from_json_text(raw: str) -> Any:
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    try:
+        return json.loads(text)
+    except Exception:
+        return text
+
+
+def extract_multi_options(
+    schema: Dict[str, Any], prop_name: str, fallback: List[str]
+) -> List[str]:
     prop = schema.get(prop_name)
-    if not isinstance(prop, dict):
-        return fallback
-    if prop.get("type") != "multi_select":
+    if not isinstance(prop, dict) or prop.get("type") != "multi_select":
         return fallback
     multi = prop.get("multi_select") or {}
     options = multi.get("options") if isinstance(multi, dict) else []
-    labels = [str(o.get("name", "")) for o in options if isinstance(o, dict) and o.get("name")]
+    labels = [
+        str(opt.get("name", ""))
+        for opt in options
+        if isinstance(opt, dict) and opt.get("name")
+    ]
     return labels or fallback
 
 
-def load_active_session(client: Client, sessions_db_id: str, sessions_schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def list_sessions(
+    client: Client, sessions_db_id: str, sessions_schema: Dict[str, Any]
+) -> List[Dict[str, Any]]:
     active_prop = find_prop(sessions_schema, "active", "checkbox")
-    title_prop = find_prop(sessions_schema, "Name", "title") or find_prop(sessions_schema, "session_code", "rich_text")
+    code_rich = find_prop(sessions_schema, "session_code", "rich_text")
+    code_title = find_prop(sessions_schema, "Name", "title")
 
-    query_args: Dict[str, Any] = {"page_size": 1, "sorts": [{"timestamp": "created_time", "direction": "descending"}]}
-    if active_prop:
-        query_args["filter"] = {"property": active_prop, "checkbox": {"equals": True}}
+    pages = query_all(
+        client,
+        sessions_db_id,
+        sorts=[{"timestamp": "created_time", "direction": "descending"}],
+        page_size=50,
+    )
+    rows: List[Dict[str, Any]] = []
+    for page in pages:
+        props = page.get("properties", {})
+        code = (
+            rich_text_value(props, code_rich)
+            or title_value(props, code_title)
+            or "Session"
+        )
+        is_active = False
+        if active_prop:
+            active_value = props.get(active_prop)
+            is_active = (
+                bool((active_value or {}).get("checkbox"))
+                if isinstance(active_value, dict)
+                else False
+            )
+        rows.append({"id": page.get("id", ""), "code": code, "active": is_active})
+    return rows
 
-    payload = query_db(client, sessions_db_id, **query_args)
-    results = payload.get("results", [])
-    if not results:
-        return None
-    page = results[0]
-    props = page.get("properties", {})
 
-    code = title_value(props, title_prop)
-    if not code:
-        code = rich_text_value(props, find_prop(sessions_schema, "session_code", "rich_text"))
+def ensure_questions_for_session(
+    client: Client,
+    questions_db_id: str,
+    questions_schema: Dict[str, Any],
+    session_id: str,
+    diet_options: List[str],
+    allergens_options: List[str],
+    hard_no_options: List[str],
+) -> List[Dict[str, Any]]:
+    session_prop = find_prop(questions_schema, "session", "relation")
+    title_prop = find_prop(questions_schema, "Name", "title")
+    kind_prop = find_prop(questions_schema, "kind", "select")
+    qtype_prop = find_prop(questions_schema, "qtype", "select")
+    order_prop = find_prop(questions_schema, "order", "number")
+    required_prop = find_prop(questions_schema, "required", "checkbox")
+    max_select_prop = find_prop(questions_schema, "max_select", "number")
+    options_json_prop = find_prop(questions_schema, "options_json", "rich_text")
 
-    return {"id": page.get("id", ""), "code": code or "GLOBAL-SESSION"}
+    if not title_prop:
+        return []
+
+    existing_pages = query_all(
+        client,
+        questions_db_id,
+        filter={"property": session_prop, "relation": {"contains": session_id}}
+        if session_prop
+        else None,
+        page_size=100,
+    )
+
+    existing_by_prompt: Dict[str, Dict[str, Any]] = {}
+    for page in existing_pages:
+        props = page.get("properties", {})
+        prompt = title_value(props, title_prop)
+        if prompt:
+            existing_by_prompt[prompt] = page
+
+    seeded: List[Dict[str, Any]] = []
+    for item in QUESTION_CATALOG:
+        options: List[str] = []
+        if item["key"] == "diet":
+            options = diet_options
+        elif item["key"] == "allergens":
+            options = allergens_options
+        elif item["key"] == "hard_no":
+            options = hard_no_options
+        elif item["key"] == "texture":
+            options = TEXTURE_OPTIONS
+        elif item["key"] == "cravings":
+            options = CRAVINGS_OPTIONS
+
+        if item["prompt"] not in existing_by_prompt:
+            properties: Dict[str, Any] = {
+                title_prop: {
+                    "title": [{"type": "text", "text": {"content": item["prompt"]}}]
+                }
+            }
+            if session_prop:
+                properties[session_prop] = {"relation": [{"id": session_id}]}
+            if kind_prop:
+                properties[kind_prop] = {"select": {"name": item["kind"]}}
+            if qtype_prop:
+                properties[qtype_prop] = {"select": {"name": item["qtype"]}}
+            if order_prop:
+                properties[order_prop] = {"number": item["order"]}
+            if required_prop:
+                properties[required_prop] = {
+                    "checkbox": bool(item.get("required", False))
+                }
+            if max_select_prop and item.get("max_select") is not None:
+                properties[max_select_prop] = {"number": int(item["max_select"])}
+            if options_json_prop:
+                properties[options_json_prop] = {
+                    "rich_text": [
+                        {
+                            "type": "text",
+                            "text": {
+                                "content": json.dumps(options, ensure_ascii=False)
+                            },
+                        }
+                    ]
+                }
+
+            page = client.pages.create(
+                parent={"database_id": questions_db_id}, properties=properties
+            )
+            existing_by_prompt[item["prompt"]] = page
+
+    # normalize output sorted by order
+    for item in QUESTION_CATALOG:
+        page = existing_by_prompt.get(item["prompt"])
+        if not page:
+            continue
+        props = page.get("properties", {})
+        stored_options = (
+            from_json_text(rich_text_value(props, options_json_prop))
+            if options_json_prop
+            else []
+        )
+        if not isinstance(stored_options, list):
+            stored_options = []
+        seeded.append(
+            {
+                "id": page.get("id", ""),
+                "key": item["key"],
+                "prompt": item["prompt"],
+                "kind": item["kind"],
+                "qtype": item["qtype"],
+                "required": bool(item.get("required", False)),
+                "max_select": item.get("max_select"),
+                "options": [str(v) for v in stored_options],
+                "order": item["order"],
+            }
+        )
+
+    seeded.sort(key=lambda r: int(r.get("order", 0)))
+    return seeded
 
 
-def list_players(client: Client, players_db_id: str, players_schema: Dict[str, Any], session_id: str) -> List[Dict[str, Any]]:
+def list_players(
+    client: Client, players_db_id: str, players_schema: Dict[str, Any], session_id: str
+) -> List[Dict[str, Any]]:
     session_prop = find_prop(players_schema, "session", "relation")
     nickname_prop = find_prop(players_schema, "nickname", "rich_text")
     title_prop = find_prop(players_schema, "Name", "title")
@@ -185,13 +446,15 @@ def list_players(client: Client, players_db_id: str, players_schema: Dict[str, A
     allergens_prop = find_prop(players_schema, "allergens", "multi_select")
     hard_no_prop = find_prop(players_schema, "hard_no", "multi_select")
 
-    args: Dict[str, Any] = {"page_size": 100}
-    if session_prop:
-        args["filter"] = {"property": session_prop, "relation": {"contains": session_id}}
+    filters = (
+        {"property": session_prop, "relation": {"contains": session_id}}
+        if session_prop
+        else None
+    )
+    pages = query_all(client, players_db_id, filter=filters, page_size=100)
 
-    payload = query_db(client, players_db_id, **args)
     rows: List[Dict[str, Any]] = []
-    for page in payload.get("results", []):
+    for page in pages:
         props = page.get("properties", {})
         name = rich_text_value(props, nickname_prop) or title_value(props, title_prop)
         rows.append(
@@ -205,6 +468,7 @@ def list_players(client: Client, players_db_id: str, players_schema: Dict[str, A
                 "hard_no": multi_select_values(props, hard_no_prop),
             }
         )
+
     return rows
 
 
@@ -218,12 +482,12 @@ def save_player_profile(
     hard_no: List[str],
     bio_note: str,
 ) -> None:
-    props: Dict[str, Any] = {}
     diet_prop = find_prop(players_schema, "diet", "multi_select")
     allergens_prop = find_prop(players_schema, "allergens", "multi_select")
     hard_no_prop = find_prop(players_schema, "hard_no", "multi_select")
     bio_prop = find_prop(players_schema, "notes_public", "rich_text")
 
+    props: Dict[str, Any] = {}
     if diet_prop:
         props[diet_prop] = {"multi_select": [{"name": v} for v in diet]}
     if allergens_prop:
@@ -231,69 +495,174 @@ def save_player_profile(
     if hard_no_prop:
         props[hard_no_prop] = {"multi_select": [{"name": v} for v in hard_no]}
     if bio_prop:
-        props[bio_prop] = {"rich_text": [{"type": "text", "text": {"content": bio_note}}]}
+        props[bio_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": bio_note}}]
+        }
 
     if props:
         client.pages.update(page_id=player_id, properties=props)
 
 
-def save_tonight_response(
+def join_participant_to_session(
+    client: Client,
+    players_db_id: str,
+    players_schema: Dict[str, Any],
+    session_id: str,
+    display_name: str,
+    role: str = "guest",
+) -> Dict[str, Any]:
+    existing = list_players(client, players_db_id, players_schema, session_id)
+    target = normalize_label(display_name)
+    for player in existing:
+        if normalize_label(player.get("name", "")) == target:
+            return player
+
+    session_prop = find_prop(players_schema, "session", "relation")
+    nickname_prop = find_prop(players_schema, "nickname", "rich_text")
+    title_prop = find_prop(players_schema, "Name", "title")
+    role_prop = find_prop(players_schema, "role", "select")
+    status_prop = find_prop(players_schema, "status", "select")
+    access_prop = find_prop(players_schema, "access_key", "rich_text") or find_prop(
+        players_schema, "player_id", "rich_text"
+    )
+
+    synthetic_key = (
+        f"guest-{int(datetime.now().timestamp())}-{abs(hash(display_name)) % 10000}"
+    )
+    props: Dict[str, Any] = {}
+    if session_prop:
+        props[session_prop] = {"relation": [{"id": session_id}]}
+    if nickname_prop:
+        props[nickname_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": display_name}}]
+        }
+    if title_prop:
+        props[title_prop] = {
+            "title": [{"type": "text", "text": {"content": display_name}}]
+        }
+    if role_prop:
+        props[role_prop] = {"select": {"name": role}}
+    if status_prop:
+        props[status_prop] = {"select": {"name": "active"}}
+    if access_prop:
+        props[access_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": synthetic_key}}]
+        }
+
+    created = client.pages.create(
+        parent={"database_id": players_db_id}, properties=props
+    )
+    created_props = created.get("properties", {})
+    return {
+        "id": created.get("id", ""),
+        "name": rich_text_value(created_props, nickname_prop)
+        or title_value(created_props, title_prop)
+        or display_name,
+        "role": (select_value(created_props, role_prop) or role).lower(),
+        "bio_note": rich_text_value(
+            created_props, find_prop(players_schema, "notes_public", "rich_text")
+        ),
+        "diet": multi_select_values(
+            created_props, find_prop(players_schema, "diet", "multi_select")
+        ),
+        "allergens": multi_select_values(
+            created_props, find_prop(players_schema, "allergens", "multi_select")
+        ),
+        "hard_no": multi_select_values(
+            created_props, find_prop(players_schema, "hard_no", "multi_select")
+        ),
+    }
+
+
+def upsert_response(
     client: Client,
     responses_db_id: str,
     responses_schema: Dict[str, Any],
     *,
     session_id: str,
     player_id: str,
-    spice: int,
-    texture: str,
-    cravings: List[str],
-    tonight_note: str,
+    question_id: str,
+    value: Any,
+    tonight_note: str = "",
 ) -> None:
     title_prop = find_prop(responses_schema, "Name", "title")
     session_prop = find_prop(responses_schema, "session", "relation")
     player_prop = find_prop(responses_schema, "player", "relation")
     value_prop = find_prop(responses_schema, "value", "rich_text")
     value_number_prop = find_prop(responses_schema, "value_number", "number")
+    question_rel_prop = find_prop(responses_schema, "question", "relation")
+    question_id_prop = find_prop(
+        responses_schema, "question_id", "rich_text"
+    ) or find_prop(responses_schema, "item_id", "rich_text")
     note_public_prop = find_prop(responses_schema, "notes_public", "rich_text")
     created_prop = find_prop(responses_schema, "created_at", "date")
 
-    payload_json = json.dumps(
-        {
-            "form_type": "affranchis_cuisine_v0",
-            "spice_tolerance": spice,
-            "texture": texture,
-            "cravings": cravings,
-        },
-        ensure_ascii=False,
-    )
+    logical_key = f"Q:{question_id} P:{player_id}"
+
+    filter_blocks: List[Dict[str, Any]] = []
+    if title_prop:
+        filter_blocks.append({"property": title_prop, "title": {"equals": logical_key}})
+    if session_prop:
+        filter_blocks.append(
+            {"property": session_prop, "relation": {"contains": session_id}}
+        )
+    if player_prop:
+        filter_blocks.append(
+            {"property": player_prop, "relation": {"contains": player_id}}
+        )
+    if question_rel_prop:
+        filter_blocks.append(
+            {"property": question_rel_prop, "relation": {"contains": question_id}}
+        )
+    elif question_id_prop:
+        filter_blocks.append(
+            {"property": question_id_prop, "rich_text": {"equals": question_id}}
+        )
+
+    query_filter = None
+    if filter_blocks:
+        query_filter = (
+            filter_blocks[0] if len(filter_blocks) == 1 else {"and": filter_blocks}
+        )
+
+    existing = query_all(client, responses_db_id, filter=query_filter, page_size=10)
+    target_page_id = existing[0].get("id") if existing else None
 
     props: Dict[str, Any] = {}
     if title_prop:
         props[title_prop] = {
-            "title": [
-                {
-                    "type": "text",
-                    "text": {"content": f"Cuisine · {datetime.now().strftime('%Y-%m-%d %H:%M')}"},
-                }
-            ]
+            "title": [{"type": "text", "text": {"content": logical_key}}]
         }
     if session_prop:
         props[session_prop] = {"relation": [{"id": session_id}]}
     if player_prop:
         props[player_prop] = {"relation": [{"id": player_id}]}
+    if question_rel_prop:
+        props[question_rel_prop] = {"relation": [{"id": question_id}]}
+    if question_id_prop:
+        props[question_id_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": question_id}}]
+        }
     if value_prop:
-        props[value_prop] = {"rich_text": [{"type": "text", "text": {"content": payload_json}}]}
-    if value_number_prop:
-        props[value_number_prop] = {"number": spice}
-    if note_public_prop:
-        props[note_public_prop] = {"rich_text": [{"type": "text", "text": {"content": tonight_note}}]}
+        props[value_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": to_json_text(value)}}]
+        }
+    if value_number_prop and isinstance(value, (int, float)):
+        props[value_number_prop] = {"number": float(value)}
+    if note_public_prop and tonight_note:
+        props[note_public_prop] = {
+            "rich_text": [{"type": "text", "text": {"content": tonight_note}}]
+        }
     if created_prop:
         props[created_prop] = {"date": {"start": now_iso()}}
 
-    client.pages.create(parent={"database_id": responses_db_id}, properties=props)
+    if target_page_id:
+        client.pages.update(page_id=target_page_id, properties=props)
+    else:
+        client.pages.create(parent={"database_id": responses_db_id}, properties=props)
 
 
-def load_tonight_responses(
+def load_responses_by_session(
     client: Client,
     responses_db_id: str,
     responses_schema: Dict[str, Any],
@@ -302,106 +671,217 @@ def load_tonight_responses(
     session_prop = find_prop(responses_schema, "session", "relation")
     player_prop = find_prop(responses_schema, "player", "relation")
     value_prop = find_prop(responses_schema, "value", "rich_text")
+    question_rel_prop = find_prop(responses_schema, "question", "relation")
+    question_id_prop = find_prop(
+        responses_schema, "question_id", "rich_text"
+    ) or find_prop(responses_schema, "item_id", "rich_text")
+    title_prop = find_prop(responses_schema, "Name", "title")
     note_public_prop = find_prop(responses_schema, "notes_public", "rich_text")
-    created_prop = find_prop(responses_schema, "created_at", "date")
 
-    args: Dict[str, Any] = {"page_size": 100, "sorts": [{"timestamp": "created_time", "direction": "descending"}]}
-    if session_prop:
-        args["filter"] = {"property": session_prop, "relation": {"contains": session_id}}
+    pages = query_all(
+        client,
+        responses_db_id,
+        filter={"property": session_prop, "relation": {"contains": session_id}}
+        if session_prop
+        else None,
+        page_size=200,
+    )
 
-    payload = query_db(client, responses_db_id, **args)
     rows: List[Dict[str, Any]] = []
-    for page in payload.get("results", []):
+    for page in pages:
         props = page.get("properties", {})
-        raw_json = rich_text_value(props, value_prop)
-        parsed: Dict[str, Any] = {}
-        try:
-            parsed = json.loads(raw_json) if raw_json else {}
-        except Exception:
-            parsed = {}
-        if parsed.get("form_type") != "affranchis_cuisine_v0":
-            continue
-        player_ids = relation_ids(props, player_prop)
+        qid = ""
+        rel_ids = relation_ids(props, question_rel_prop)
+        if rel_ids:
+            qid = rel_ids[0]
+        if not qid:
+            qid = rich_text_value(props, question_id_prop)
+        if not qid and title_prop:
+            title_raw = title_value(props, title_prop)
+            if title_raw.startswith("Q:") and " P:" in title_raw:
+                qid = title_raw.split(" P:")[0].replace("Q:", "").strip()
+
         rows.append(
             {
                 "id": page.get("id", ""),
-                "player_id": player_ids[0] if player_ids else "",
-                "spice": int(parsed.get("spice_tolerance", 0) or 0),
-                "texture": str(parsed.get("texture", "")),
-                "cravings": [str(v) for v in parsed.get("cravings", []) if v],
+                "player_id": (relation_ids(props, player_prop) or [""])[0],
+                "question_id": qid,
+                "value": from_json_text(rich_text_value(props, value_prop)),
                 "tonight_note": rich_text_value(props, note_public_prop),
-                "created_at": date_start(props, created_prop) or page.get("created_time", ""),
+                "created_at": page.get("created_time", ""),
             }
         )
+
     return rows
 
 
-def render_host_view(players: List[Dict[str, Any]], responses: List[Dict[str, Any]]) -> None:
-    st.markdown("### 🔎 Vue hôte (debug)")
-    st.write(f"Participants: **{len(players)}**")
+def build_latest_by_player_question(
+    rows: List[Dict[str, Any]],
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    latest: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    sorted_rows = sorted(rows, key=lambda r: str(r.get("created_at", "")), reverse=True)
+    for row in sorted_rows:
+        pid = str(row.get("player_id", ""))
+        qid = str(row.get("question_id", ""))
+        if not pid or not qid:
+            continue
+        latest.setdefault(pid, {})
+        if qid not in latest[pid]:
+            latest[pid][qid] = row
+    return latest
 
-    spice_counter = Counter([max(0, min(5, int(r.get("spice", 0)))) for r in responses])
+
+def render_host_view(
+    players: List[Dict[str, Any]],
+    questions: List[Dict[str, Any]],
+    responses: List[Dict[str, Any]],
+) -> None:
+    st.markdown("### 🔎 Vue hôte (debug)")
+
+    question_by_key = {q["key"]: q["id"] for q in questions}
+    latest = build_latest_by_player_question(responses)
+
+    respondents = len([pid for pid in latest.keys() if pid])
+    invited = len(players)
+
+    st.markdown("#### 📊 Totaux")
+    st.write(f"Répondants: **{respondents}** / Invités: **{invited}**")
+
+    diet_counter = Counter()
+    allergens_counter = Counter()
+    hard_no_counter = Counter()
+    spice_counter = Counter()
+    cravings_counter = Counter()
+
+    for player in players:
+        for val in player.get("diet", []):
+            diet_counter[val] += 1
+        for val in player.get("allergens", []):
+            allergens_counter[val] += 1
+        for val in player.get("hard_no", []):
+            hard_no_counter[val] += 1
+
+    for pid, qmap in latest.items():
+        spice_row = qmap.get(question_by_key.get("spice", ""), {})
+        cravings_row = qmap.get(question_by_key.get("cravings", ""), {})
+        spice_val = spice_row.get("value")
+        if isinstance(spice_val, (int, float, str)):
+            try:
+                spice_counter[int(float(spice_val))] += 1
+            except Exception:
+                pass
+        cravings_val = cravings_row.get("value")
+        if isinstance(cravings_val, list):
+            for c in cravings_val:
+                cravings_counter[str(c)] += 1
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Régimes**")
+        st.dataframe(
+            pd.DataFrame(diet_counter.items(), columns=["régime", "total"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.markdown("**Allergènes**")
+        st.dataframe(
+            pd.DataFrame(allergens_counter.items(), columns=["allergène", "total"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+    with c2:
+        st.markdown("**Ingrédients non**")
+        st.dataframe(
+            pd.DataFrame(hard_no_counter.items(), columns=["ingrédient", "total"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+        st.markdown("**Envies principales**")
+        st.dataframe(
+            pd.DataFrame(cravings_counter.most_common(10), columns=["envie", "total"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+
     if spice_counter:
         spice_df = pd.DataFrame(
-            {"niveau": list(spice_counter.keys()), "total": list(spice_counter.values())}
-        ).sort_values("niveau")
-        st.markdown("**Distribution du piquant**")
+            sorted(spice_counter.items()), columns=["niveau", "total"]
+        )
+        st.markdown("**Distribution du piquant (0-5)**")
         st.bar_chart(spice_df.set_index("niveau"))
-    else:
-        st.info("Aucune donnée de piquant pour le moment.")
 
-    cravings_counter = Counter()
-    for row in responses:
-        for craving in row.get("cravings", []):
-            cravings_counter[craving] += 1
-    if cravings_counter:
-        st.markdown("**Envies principales**")
-        top_df = pd.DataFrame(cravings_counter.most_common(10), columns=["envie", "total"])
-        st.dataframe(top_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Aucune envie enregistrée pour le moment.")
-
-    latest_by_player: Dict[str, Dict[str, Any]] = {}
-    for row in responses:
-        pid = row.get("player_id", "")
-        if pid and pid not in latest_by_player:
-            latest_by_player[pid] = row
+    st.markdown("#### 👥 Détail par personne")
+    only_critical = st.checkbox("Afficher seulement contraintes critiques", value=False)
 
     table_rows: List[Dict[str, Any]] = []
-    for player in players:
-        latest = latest_by_player.get(player["id"], {})
+    for p in players:
+        qmap = latest.get(p["id"], {})
+        spice_val = qmap.get(question_by_key.get("spice", ""), {}).get("value", "")
+        cravings_val = qmap.get(question_by_key.get("cravings", ""), {}).get(
+            "value", []
+        )
+        tonight_payload = qmap.get(question_by_key.get("tonight_note", ""), {}).get(
+            "value", ""
+        )
+        tonight_note = (
+            tonight_payload.get("note", "")
+            if isinstance(tonight_payload, dict)
+            else tonight_payload
+        )
+        if not tonight_note:
+            tonight_note = qmap.get(question_by_key.get("tonight_note", ""), {}).get(
+                "tonight_note", ""
+            )
+
+        if only_critical and not (p.get("allergens") or p.get("hard_no")):
+            continue
+
         table_rows.append(
             {
-                "name": player.get("name", ""),
-                "diet": ", ".join(player.get("diet", [])),
-                "allergens": ", ".join(player.get("allergens", [])),
-                "hard-no": ", ".join(player.get("hard_no", [])),
-                "cravings": ", ".join(latest.get("cravings", [])),
-                "bio note": player.get("bio_note", ""),
-                "tonight note": latest.get("tonight_note", ""),
+                "nom": p.get("name", ""),
+                "régime": ", ".join(p.get("diet", [])),
+                "allergènes": ", ".join(p.get("allergens", [])),
+                "ingrédients non": ", ".join(p.get("hard_no", [])),
+                "piquant": spice_val,
+                "envies": ", ".join(
+                    cravings_val if isinstance(cravings_val, list) else []
+                ),
+                "note bio": p.get("bio_note", ""),
+                "note ce soir": tonight_note if isinstance(tonight_note, str) else "",
             }
         )
 
-    st.markdown("**Détails par personne**")
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    table_df = pd.DataFrame(table_rows)
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+    st.markdown("#### 🧾 Export")
+    csv_data = table_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Télécharger CSV (vue hôte)",
+        data=csv_data,
+        file_name=f"affranchis-host-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
 
 def main() -> None:
-    st.set_page_config(page_title="Les Affranchis · Cuisine", page_icon="🍲", layout="wide")
+    st.set_page_config(
+        page_title="Les Affranchis · Cuisine", page_icon="🍲", layout="wide"
+    )
     st.title("Les Affranchis · Cuisine")
 
     debug("🔄 App mise à jour !")
-    debug("🐙 Récupération du code depuis Github...")
-    debug("📦 Traitement des dépendances...")
-    debug("📦 Dépendances traitées !")
+    debug("🔐 Connexion base de données…")
 
     try:
         token = env_required("NOTION_TOKEN")
         players_db_id = env_required("AFF_PLAYERS_DB_ID")
         sessions_db_id = env_required("AFF_SESSIONS_DB_ID")
+        questions_db_id = env_required("AFF_QUESTIONS_DB_ID")
         responses_db_id = env_required("AFF_RESPONSES_DB_ID")
     except Exception as exc:
-        st.error(str(exc))
+        st.error(f"⚠️ Erreur : {exc}")
         st.stop()
 
     client = Client(auth=token)
@@ -409,89 +889,328 @@ def main() -> None:
     try:
         sessions_schema = safe_get_schema(client, sessions_db_id)
         players_schema = safe_get_schema(client, players_db_id)
+        questions_schema = safe_get_schema(client, questions_db_id)
         responses_schema = safe_get_schema(client, responses_db_id)
     except Exception as exc:
-        st.error(f"Erreur Notion: {exc}")
+        st.error("⚠️ Erreur : impossible d'initialiser les schémas base de données.")
+        st.error(f"🔍 Détail : {exc}")
         st.stop()
 
-    active_session = load_active_session(client, sessions_db_id, sessions_schema)
-    if not active_session:
-        st.error("Aucune session active trouvée.")
+    sessions = list_sessions(client, sessions_db_id, sessions_schema)
+    active_sessions = [s for s in sessions if s.get("active")]
+    if len(active_sessions) == 1:
+        selected_session = active_sessions[0]
+        debug(f"🗂️ Session active : {selected_session['code']}")
+    elif sessions:
+        debug("🗂️ Plusieurs sessions disponibles, sélection manuelle requise.")
+        labels = [
+            f"{s['code']} {'(active)' if s.get('active') else ''}" for s in sessions
+        ]
+        idx = 0
+        selected_label = st.selectbox("Session", labels, index=idx)
+        selected_session = sessions[labels.index(selected_label)]
+    else:
+        st.error("⚠️ Erreur : aucune session trouvée.")
         st.stop()
 
-    debug("🟢 Session Les Affranchis prête.")
-    debug("🍲 Collecte des contraintes et des envies.")
+    players = list_players(
+        client, players_db_id, players_schema, selected_session["id"]
+    )
 
-    players = list_players(client, players_db_id, players_schema, active_session["id"])
-    if not players:
-        st.error("Aucun participant disponible dans la session active.")
+    debug("🟢 Session prête")
+    st.caption("Tu peux répondre en 2 minutes. Tes contraintes passent avant tout.")
+
+    st.markdown("## 0) Participation")
+    participate = st.radio(
+        f"Vas-tu participer à la session « {selected_session['code']} » ?",
+        options=["Oui", "Non"],
+        horizontal=True,
+    )
+    if participate == "Non":
+        st.info("Merci. Tu pourras revenir plus tard si tu changes d'avis.")
         st.stop()
 
-    player_names = [p["name"] for p in players]
-    selected_name = st.selectbox("Participant", player_names)
-    selected_player = next((p for p in players if p["name"] == selected_name), players[0])
+    player_state_key = f"aff_current_player_{selected_session['id']}"
+    selected_player_id = str(st.session_state.get(player_state_key, ""))
+
+    identity_mode = "Je m'inscris à cette session"
+    if players:
+        identity_mode = st.radio(
+            "Identification",
+            options=["Je suis déjà inscrit·e", "Je m'inscris à cette session"],
+            horizontal=True,
+        )
+
+    if identity_mode == "Je suis déjà inscrit·e":
+        names = [p["name"] for p in players]
+        picked_name = st.selectbox("Participant", names)
+        picked = next((p for p in players if p["name"] == picked_name), players[0])
+        selected_player_id = picked["id"]
+        st.session_state[player_state_key] = selected_player_id
+        st.success(f"✅ Participation confirmée pour {picked['name']}.")
+    else:
+        new_name = st.text_input("Ton prénom ou pseudo")
+        is_host_flag = st.checkbox("Je suis hôte", value=False)
+        if st.button("Je participe à cette session", use_container_width=True):
+            if not normalize_label(new_name):
+                st.warning("⚠️ Merci d'indiquer un prénom ou pseudo.")
+                st.stop()
+            with st.status(
+                "🧾 Inscription à la session…", expanded=True
+            ) as join_status:
+                try:
+                    join_status.write("1/2 · Vérification du participant.")
+                    joined = join_participant_to_session(
+                        client,
+                        players_db_id,
+                        players_schema,
+                        selected_session["id"],
+                        display_name=new_name.strip(),
+                        role="host" if is_host_flag else "guest",
+                    )
+                    join_status.write("2/2 · Liaison à la session.")
+                    st.session_state[player_state_key] = joined["id"]
+                    join_status.update(
+                        label="✅ Participation enregistrée", state="complete"
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    join_status.update(label="⚠️ Échec de l'inscription", state="error")
+                    st.error("⚠️ Erreur : impossible d'inscrire le participant.")
+                    st.error(f"🔍 Détail : {exc}")
+                    st.stop()
+
+    selected_player_id = str(st.session_state.get(player_state_key, selected_player_id))
+    players = list_players(
+        client, players_db_id, players_schema, selected_session["id"]
+    )
+    selected_player = next((p for p in players if p["id"] == selected_player_id), None)
+    if not selected_player:
+        st.info("👋 Confirme d'abord ta participation pour ouvrir le questionnaire.")
+        st.stop()
+
+    st.caption(f"Participant actif : **{selected_player['name']}**")
+
+    diet_options = extract_multi_options(
+        players_schema,
+        "diet",
+        ["vegan", "végétarien", "pescétarien", "halal", "kosher", "sans porc"],
+    )
+    allergens_options = extract_multi_options(
+        players_schema,
+        "allergens",
+        ["gluten", "fruits à coque", "arachide", "sésame", "soja", "lactose", "œuf"],
+    )
+    hard_no_options = extract_multi_options(
+        players_schema, "hard_no", ["ail", "oignon", "coriandre", "très épicé"]
+    )
+
+    with st.status(
+        "🧱 Préparation du catalogue de questions…", expanded=False
+    ) as seed_status:
+        try:
+            questions = ensure_questions_for_session(
+                client,
+                questions_db_id,
+                questions_schema,
+                selected_session["id"],
+                diet_options,
+                allergens_options,
+                hard_no_options,
+            )
+            seed_status.update(label="✅ Questions prêtes", state="complete")
+        except Exception as exc:
+            seed_status.update(
+                label="⚠️ Erreur de préparation des questions", state="error"
+            )
+            st.error(f"🔍 Détail : {exc}")
+            st.stop()
+
+    qid_by_key = {q["key"]: q["id"] for q in questions}
+
     is_host = selected_player.get("role") == "host"
 
-    st.markdown("## Étape 1 · Contraintes")
-    diet_options = extract_multi_options(players_schema, "diet", ["vegan", "végétarien", "pescétarien", "halal", "kosher", "sans porc"])
-    allergens_options = extract_multi_options(players_schema, "allergens", ["gluten", "fruits à coque", "arachide", "sésame", "soja", "lactose", "œuf"])
-    hard_no_options = extract_multi_options(players_schema, "hard_no", ["ail", "oignon", "coriandre", "très épicé"])
+    st.markdown("## 1) Contraintes")
+    diet = st.multiselect(
+        "Régime", options=diet_options, default=selected_player.get("diet", [])
+    )
+    allergens = st.multiselect(
+        "Allergènes",
+        options=allergens_options,
+        default=selected_player.get("allergens", []),
+    )
+    hard_no = st.multiselect(
+        'Ingrédients "non"',
+        options=hard_no_options,
+        default=selected_player.get("hard_no", []),
+    )
+    hard_no_other = normalize_label(st.text_input("Autre ingrédient non (optionnel)"))
 
-    diet = st.multiselect("Régime", options=diet_options, default=selected_player.get("diet", []))
-    allergens = st.multiselect("Allergènes", options=allergens_options, default=selected_player.get("allergens", []))
-    hard_no = st.multiselect("Ingrédients interdits", options=hard_no_options, default=selected_player.get("hard_no", []))
+    st.markdown("## 2) Préférences")
+    spice = st.slider("Tolérance au piquant", min_value=0, max_value=5, value=3, step=1)
+    st.caption("0 pas du tout · 3 ok · 5 à fond")
+    texture = st.radio("Texture", options=TEXTURE_OPTIONS, horizontal=True)
+    st.markdown("Condiments (optionnel)")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        pref_ail = st.select_slider("Ail", options=CONDIMENT_CHOICES, value="ok")
+    with c2:
+        pref_oignon = st.select_slider("Oignon", options=CONDIMENT_CHOICES, value="ok")
+    with c3:
+        pref_coriandre = st.select_slider(
+            "Coriandre", options=CONDIMENT_CHOICES, value="ok"
+        )
 
-    st.markdown("## Étape 2 · Préférences")
-    spice = st.slider("Tolérance au piquant", min_value=0, max_value=5, value=2, step=1)
-    texture = st.radio("Texture", options=["croquant", "crémeux", "mixte"], horizontal=True)
-
-    st.markdown("## Étape 3 · Envies (ressenti)")
+    st.markdown("## 3) Envies (ressentis)")
     cravings = st.pills(
-        "Choisissez jusqu'à 2 envies",
+        "Choisis jusqu'à 2 envies",
         options=CRAVINGS_OPTIONS,
         selection_mode="multi",
         max_selections=2,
         default=[],
     )
+    surprise = st.toggle("Surprise")
+    if len(cravings or []) > 2:
+        st.warning("⚠️ Maximum 2 envies pour faciliter la synthèse cuisine.")
 
-    st.markdown("## Étape 4 · Notes publiques")
+    st.markdown("## 4) Notes")
     bio_note = st.text_area(
-        "Note bio (persistante)",
+        "Une phrase sur toi (public, persistant)",
         value=selected_player.get("bio_note", ""),
-        placeholder="Qui êtes-vous, en quelques mots ?",
     )
-    tonight_note = st.text_area(
-        "Note ce soir (partagée)",
-        value="",
-        placeholder="Votre humeur et vos envies de ce soir.",
-    )
+    tonight_note = st.text_area("Un souhait pour ce soir (public, session)", value="")
 
     if st.button("Enregistrer", type="primary", use_container_width=True):
-        try:
-            save_player_profile(
-                client,
-                selected_player["id"],
-                players_schema,
-                diet=diet,
-                allergens=allergens,
-                hard_no=hard_no,
-                bio_note=bio_note,
-            )
-            save_tonight_response(
-                client,
-                responses_db_id,
-                responses_schema,
-                session_id=active_session["id"],
-                player_id=selected_player["id"],
-                spice=spice,
-                texture=texture,
-                cravings=[normalize_spaces(v) for v in (cravings or [])],
-                tonight_note=tonight_note,
-            )
-            st.success("Réponses enregistrées.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Échec de sauvegarde: {exc}")
+        if not texture:
+            st.error("⚠️ La texture est requise.")
+            st.stop()
+
+        with st.status("🧾 Enregistrement des réponses…", expanded=True) as save_status:
+            try:
+                save_status.write("1/4 · Mise à jour des champs persistants joueur.")
+                hard_no_merged = list(
+                    dict.fromkeys(
+                        [*hard_no, *([hard_no_other] if hard_no_other else [])]
+                    )
+                )
+                save_player_profile(
+                    client,
+                    selected_player["id"],
+                    players_schema,
+                    diet=diet,
+                    allergens=allergens,
+                    hard_no=hard_no_merged,
+                    bio_note=bio_note,
+                )
+
+                if hard_no_other and is_host:
+                    save_status.write(
+                        '2/4 · Vérification typo/duplication pour "autre".'
+                    )
+                    _ = ensure_multiselect_option(
+                        client,
+                        players_db_id,
+                        "hard_no",
+                        hard_no_other,
+                        similarity_threshold=0.90,
+                    )
+
+                save_status.write("3/4 · Upsert des réponses par question.")
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["diet"],
+                    value=diet,
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["allergens"],
+                    value=allergens,
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["hard_no"],
+                    value=hard_no_merged,
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["spice"],
+                    value=spice,
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["texture"],
+                    value=texture,
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["cravings"],
+                    value=[normalize_label(v) for v in (cravings or [])],
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["surprise"],
+                    value=bool(surprise),
+                )
+                upsert_response(
+                    client,
+                    responses_db_id,
+                    responses_schema,
+                    session_id=selected_session["id"],
+                    player_id=selected_player["id"],
+                    question_id=qid_by_key["tonight_note"],
+                    value={
+                        "note": tonight_note,
+                        "condiments": {
+                            "ail": pref_ail,
+                            "oignon": pref_oignon,
+                            "coriandre": pref_coriandre,
+                        },
+                    },
+                    tonight_note=tonight_note,
+                )
+
+                save_status.write("4/4 · Finalisation.")
+                save_status.update(label="✅ Réponses enregistrées.", state="complete")
+                st.success(
+                    "✅ Merci. C'est noté. Tu peux modifier plus tard si besoin."
+                )
+                st.rerun()
+            except Exception as exc:
+                save_status.update(
+                    label="⚠️ Erreur d'écriture base de données", state="error"
+                )
+                st.error("⚠️ Erreur : impossible d'écrire dans base de données.")
+                detail = str(exc)
+                if is_host:
+                    st.error(f"🔍 Détail : {detail}")
 
     if is_host:
         st.markdown("---")
@@ -499,7 +1218,11 @@ def main() -> None:
         option_target = st.selectbox(
             "Propriété à enrichir",
             options=["diet", "allergens", "hard_no"],
-            format_func=lambda v: {"diet": "Régime", "allergens": "Allergènes", "hard_no": "Ingrédients interdits"}[v],
+            format_func=lambda v: {
+                "diet": "Régime",
+                "allergens": "Allergènes",
+                "hard_no": "Ingrédients non",
+            }[v],
         )
         new_option_label = st.text_input("Nouvelle option")
         if st.button("Ajouter l'option", disabled=not new_option_label.strip()):
@@ -508,7 +1231,7 @@ def main() -> None:
                     client,
                     players_db_id,
                     option_target,
-                    new_option_label,
+                    normalize_label(new_option_label),
                     similarity_threshold=0.90,
                 )
                 if result["status"] == "added":
@@ -520,15 +1243,16 @@ def main() -> None:
                 else:
                     st.warning("⚠️ Option invalide.")
             except Exception as exc:
-                st.error(f"Erreur lors de l'ajout: {exc}")
+                st.error("⚠️ Erreur : impossible de mettre à jour les options.")
+                st.error(f"🔍 Détail : {exc}")
 
-        responses = load_tonight_responses(
+        responses = load_responses_by_session(
             client,
             responses_db_id,
             responses_schema,
-            active_session["id"],
+            selected_session["id"],
         )
-        render_host_view(players, responses)
+        render_host_view(players, questions, responses)
 
 
 if __name__ == "__main__":
