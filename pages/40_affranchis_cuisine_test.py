@@ -11,6 +11,13 @@ import pandas as pd
 import streamlit as st
 from notion_client import Client
 
+from infra.app_context import get_authenticator, get_notion_repo
+from infra.app_state import (
+    ensure_auth,
+    ensure_session_state,
+    remember_access,
+    require_login,
+)
 from infra.notion_repo import get_database_schema
 from lib.notion_options import ensure_multiselect_option
 
@@ -103,6 +110,45 @@ CONDIMENT_CHOICES = ["j'aime", "ok", "j'évite"]
 # ---------- helpers ----------
 def debug(msg: str) -> None:
     st.markdown(msg)
+
+
+def _cache_store() -> Dict[str, Any]:
+    return st.session_state.setdefault("aff_read_cache", {})
+
+
+def _cache_bust_token() -> int:
+    return int(st.session_state.get("aff_cache_bust", 0))
+
+
+def _bust_cache() -> None:
+    st.session_state["aff_cache_bust"] = _cache_bust_token() + 1
+
+
+def cached_read(cache_key: str, loader):
+    token = _cache_bust_token()
+    key = f"{cache_key}|v{token}"
+    cache = _cache_store()
+    if key in cache:
+        return cache[key]
+    value = loader()
+    cache[key] = value
+    return value
+
+
+def run_progress_expander(steps: List[Dict[str, str]], runner):
+    logs: List[str] = []
+    placeholder = st.empty()
+
+    def push(title: str, msg: str) -> None:
+        logs.append(msg)
+        with placeholder.container():
+            with st.expander(title, expanded=True):
+                for line in logs:
+                    st.markdown(line)
+
+    for step in steps:
+        push(step["title"], f"- {step['msg']}")
+    return runner(push)
 
 
 def normalize_label(value: str) -> str:
@@ -501,6 +547,64 @@ def save_player_profile(
 
     if props:
         client.pages.update(page_id=player_id, properties=props)
+        _bust_cache()
+
+
+def get_player_by_page_id(
+    client: Client,
+    players_schema: Dict[str, Any],
+    player_page_id: str,
+) -> Optional[Dict[str, Any]]:
+    if not player_page_id:
+        return None
+    try:
+        page = client.pages.retrieve(page_id=player_page_id)
+    except Exception:
+        return None
+    props = page.get("properties", {})
+    nickname_prop = find_prop(players_schema, "nickname", "rich_text")
+    title_prop = find_prop(players_schema, "Name", "title")
+    role_prop = find_prop(players_schema, "role", "select")
+    return {
+        "id": page.get("id", ""),
+        "name": rich_text_value(props, nickname_prop)
+        or title_value(props, title_prop)
+        or "Participant",
+        "role": (select_value(props, role_prop) or "guest").lower(),
+        "bio_note": rich_text_value(
+            props, find_prop(players_schema, "notes_public", "rich_text")
+        ),
+        "diet": multi_select_values(
+            props, find_prop(players_schema, "diet", "multi_select")
+        ),
+        "allergens": multi_select_values(
+            props, find_prop(players_schema, "allergens", "multi_select")
+        ),
+        "hard_no": multi_select_values(
+            props, find_prop(players_schema, "hard_no", "multi_select")
+        ),
+    }
+
+
+def link_player_to_session(
+    client: Client,
+    players_schema: Dict[str, Any],
+    player_page_id: str,
+    session_id: str,
+) -> None:
+    session_prop = find_prop(players_schema, "session", "relation")
+    if not session_prop:
+        return
+    page = client.pages.retrieve(page_id=player_page_id)
+    props = page.get("properties", {})
+    current_ids = relation_ids(props, session_prop)
+    if session_id in current_ids:
+        return
+    next_ids = [{"id": pid} for pid in [*current_ids, session_id] if pid]
+    client.pages.update(
+        page_id=player_page_id, properties={session_prop: {"relation": next_ids}}
+    )
+    _bust_cache()
 
 
 def join_participant_to_session(
@@ -552,6 +656,7 @@ def join_participant_to_session(
     created = client.pages.create(
         parent={"database_id": players_db_id}, properties=props
     )
+    _bust_cache()
     created_props = created.get("properties", {})
     return {
         "id": created.get("id", ""),
@@ -660,6 +765,7 @@ def upsert_response(
         client.pages.update(page_id=target_page_id, properties=props)
     else:
         client.pages.create(parent={"database_id": responses_db_id}, properties=props)
+    _bust_cache()
 
 
 def load_responses_by_session(
@@ -872,31 +978,69 @@ def main() -> None:
     st.title("Les Affranchis · Cuisine")
 
     debug("🔄 App mise à jour !")
-    debug("🔐 Connexion base de données…")
+    debug("🔐 Vérification de la connexion…")
+
+    ensure_session_state()
+    repo = get_notion_repo()
+    if not repo:
+        st.error("⚠️ Erreur : connexion Notion indisponible.")
+        st.stop()
+    authenticator = get_authenticator(repo)
+    _, authentication_status, _ = ensure_auth(
+        authenticator,
+        callback=remember_access,
+        key="affranchis-cuisine-login",
+        location="sidebar",
+    )
+    require_login()
+    if authentication_status:
+        authenticator.logout(button_name="Se déconnecter", location="sidebar")
 
     try:
-        token = env_required("NOTION_TOKEN")
-        players_db_id = env_required("AFF_PLAYERS_DB_ID")
-        sessions_db_id = env_required("AFF_SESSIONS_DB_ID")
-        questions_db_id = env_required("AFF_QUESTIONS_DB_ID")
-        responses_db_id = env_required("AFF_RESPONSES_DB_ID")
+        players_db_id = (repo.players_db_id or "").strip() or env_required(
+            "AFF_PLAYERS_DB_ID"
+        )
+        sessions_db_id = (repo.session_db_id or "").strip() or env_required(
+            "AFF_SESSIONS_DB_ID"
+        )
+        questions_db_id = (repo.questions_db_id or "").strip() or env_required(
+            "AFF_QUESTIONS_DB_ID"
+        )
+        responses_db_id = (repo.responses_db_id or "").strip() or env_required(
+            "AFF_RESPONSES_DB_ID"
+        )
     except Exception as exc:
         st.error(f"⚠️ Erreur : {exc}")
         st.stop()
 
-    client = Client(auth=token)
+    client = repo.client
 
     try:
-        sessions_schema = safe_get_schema(client, sessions_db_id)
-        players_schema = safe_get_schema(client, players_db_id)
-        questions_schema = safe_get_schema(client, questions_db_id)
-        responses_schema = safe_get_schema(client, responses_db_id)
+        sessions_schema = cached_read(
+            f"schema:{sessions_db_id}",
+            lambda: safe_get_schema(client, sessions_db_id),
+        )
+        players_schema = cached_read(
+            f"schema:{players_db_id}",
+            lambda: safe_get_schema(client, players_db_id),
+        )
+        questions_schema = cached_read(
+            f"schema:{questions_db_id}",
+            lambda: safe_get_schema(client, questions_db_id),
+        )
+        responses_schema = cached_read(
+            f"schema:{responses_db_id}",
+            lambda: safe_get_schema(client, responses_db_id),
+        )
     except Exception as exc:
         st.error("⚠️ Erreur : impossible d'initialiser les schémas base de données.")
         st.error(f"🔍 Détail : {exc}")
         st.stop()
 
-    sessions = list_sessions(client, sessions_db_id, sessions_schema)
+    sessions = cached_read(
+        f"sessions:{sessions_db_id}",
+        lambda: list_sessions(client, sessions_db_id, sessions_schema),
+    )
     active_sessions = [s for s in sessions if s.get("active")]
     if len(active_sessions) == 1:
         selected_session = active_sessions[0]
@@ -913,12 +1057,28 @@ def main() -> None:
         st.error("⚠️ Erreur : aucune session trouvée.")
         st.stop()
 
-    players = list_players(
-        client, players_db_id, players_schema, selected_session["id"]
+    players = cached_read(
+        f"players:{players_db_id}:{selected_session['id']}",
+        lambda: list_players(
+            client, players_db_id, players_schema, selected_session["id"]
+        ),
     )
 
     debug("🟢 Session prête")
     st.caption("Tu peux répondre en 2 minutes. Tes contraintes passent avant tout.")
+
+    logged_player_page_id = str(st.session_state.get("player_page_id", "")).strip()
+    if not logged_player_page_id:
+        st.error("⚠️ Erreur : identité participant manquante, reconnecte-toi.")
+        st.stop()
+
+    logged_player = cached_read(
+        f"player:{logged_player_page_id}",
+        lambda: get_player_by_page_id(client, players_schema, logged_player_page_id),
+    )
+    if not logged_player:
+        st.error("⚠️ Erreur : participant introuvable dans la base joueurs.")
+        st.stop()
 
     st.markdown("## 0) Participation")
     participate = st.radio(
@@ -930,64 +1090,75 @@ def main() -> None:
         st.info("Merci. Tu pourras revenir plus tard si tu changes d'avis.")
         st.stop()
 
-    player_state_key = f"aff_current_player_{selected_session['id']}"
-    selected_player_id = str(st.session_state.get(player_state_key, ""))
+    player_state_key = (
+        f"aff_participation_ok:{selected_session['id']}:{logged_player_page_id}"
+    )
+    already_in_session = any(p.get("id") == logged_player_page_id for p in players)
+    if already_in_session and not st.session_state.get(player_state_key):
+        st.session_state[player_state_key] = True
 
-    identity_mode = "Je m'inscris à cette session"
-    if players:
-        identity_mode = st.radio(
-            "Identification",
-            options=["Je suis déjà inscrit·e", "Je m'inscris à cette session"],
-            horizontal=True,
+    if not st.session_state.get(player_state_key):
+        st.info(
+            "👉 Clique sur « Confirmer ma participation » pour valider l'inscription à la session."
         )
+        if st.button(
+            "Confirmer ma participation", type="primary", use_container_width=True
+        ):
+            join_steps = [
+                {
+                    "title": "🔄 Participation · Démarrage",
+                    "msg": "Initialisation de la confirmation.",
+                },
+                {
+                    "title": "🔎 Participation · Vérification",
+                    "msg": "Vérification du lien participant-session.",
+                },
+                {
+                    "title": "🧾 Participation · Écriture",
+                    "msg": "Écriture en base Notion du lien de participation.",
+                },
+            ]
 
-    if identity_mode == "Je suis déjà inscrit·e":
-        names = [p["name"] for p in players]
-        picked_name = st.selectbox("Participant", names)
-        picked = next((p for p in players if p["name"] == picked_name), players[0])
-        selected_player_id = picked["id"]
-        st.session_state[player_state_key] = selected_player_id
-        st.success(f"✅ Participation confirmée pour {picked['name']}.")
-    else:
-        new_name = st.text_input("Ton prénom ou pseudo")
-        is_host_flag = st.checkbox("Je suis hôte", value=False)
-        if st.button("Je participe à cette session", use_container_width=True):
-            if not normalize_label(new_name):
-                st.warning("⚠️ Merci d'indiquer un prénom ou pseudo.")
-                st.stop()
-            with st.status(
-                "🧾 Inscription à la session…", expanded=True
-            ) as join_status:
+            def _join_runner(push):
                 try:
-                    join_status.write("1/2 · Vérification du participant.")
-                    joined = join_participant_to_session(
-                        client,
-                        players_db_id,
-                        players_schema,
-                        selected_session["id"],
-                        display_name=new_name.strip(),
-                        role="host" if is_host_flag else "guest",
+                    push(
+                        "🧾 Participation · Écriture",
+                        "- Écriture en base Notion en cours…",
                     )
-                    join_status.write("2/2 · Liaison à la session.")
-                    st.session_state[player_state_key] = joined["id"]
-                    join_status.update(
-                        label="✅ Participation enregistrée", state="complete"
+                    link_player_to_session(
+                        client,
+                        players_schema,
+                        logged_player_page_id,
+                        selected_session["id"],
+                    )
+                    st.session_state[player_state_key] = True
+                    push(
+                        "✅ Participation · Terminée",
+                        f"- Participation confirmée pour **{logged_player['name']}**.",
                     )
                     st.rerun()
                 except Exception as exc:
-                    join_status.update(label="⚠️ Échec de l'inscription", state="error")
-                    st.error("⚠️ Erreur : impossible d'inscrire le participant.")
+                    push(
+                        "❌ Participation · Échec",
+                        "- Impossible de confirmer la participation.",
+                    )
+                    st.error("⚠️ Erreur : impossible de confirmer la participation.")
                     st.error(f"🔍 Détail : {exc}")
                     st.stop()
 
-    selected_player_id = str(st.session_state.get(player_state_key, selected_player_id))
-    players = list_players(
-        client, players_db_id, players_schema, selected_session["id"]
-    )
-    selected_player = next((p for p in players if p["id"] == selected_player_id), None)
-    if not selected_player:
-        st.info("👋 Confirme d'abord ta participation pour ouvrir le questionnaire.")
+            run_progress_expander(join_steps, _join_runner)
         st.stop()
+
+    players = cached_read(
+        f"players:{players_db_id}:{selected_session['id']}",
+        lambda: list_players(
+            client, players_db_id, players_schema, selected_session["id"]
+        ),
+    )
+    selected_player = (
+        next((p for p in players if p["id"] == logged_player_page_id), None)
+        or logged_player
+    )
 
     st.caption(f"Participant actif : **{selected_player['name']}**")
 
@@ -1009,14 +1180,17 @@ def main() -> None:
         "🧱 Préparation du catalogue de questions…", expanded=False
     ) as seed_status:
         try:
-            questions = ensure_questions_for_session(
-                client,
-                questions_db_id,
-                questions_schema,
-                selected_session["id"],
-                diet_options,
-                allergens_options,
-                hard_no_options,
+            questions = cached_read(
+                f"questions:{questions_db_id}:{selected_session['id']}",
+                lambda: ensure_questions_for_session(
+                    client,
+                    questions_db_id,
+                    questions_schema,
+                    selected_session["id"],
+                    diet_options,
+                    allergens_options,
+                    hard_no_options,
+                ),
             )
             seed_status.update(label="✅ Questions prêtes", state="complete")
         except Exception as exc:
@@ -1066,7 +1240,7 @@ def main() -> None:
         "Choisis jusqu'à 2 envies",
         options=CRAVINGS_OPTIONS,
         selection_mode="multi",
-        max_selections=2,
+        # max_selections=2,
         default=[],
     )
     surprise = st.toggle("Surprise")
@@ -1085,9 +1259,27 @@ def main() -> None:
             st.error("⚠️ La texture est requise.")
             st.stop()
 
-        with st.status("🧾 Enregistrement des réponses…", expanded=True) as save_status:
+        save_steps = [
+            {"title": "🔄 Sauvegarde · Démarrage", "msg": "Préparation des réponses."},
+            {
+                "title": "🧍 Sauvegarde · Profil",
+                "msg": "Mise à jour des champs persistants du participant.",
+            },
+            {
+                "title": "🗳️ Sauvegarde · Réponses",
+                "msg": "Upsert des réponses par question.",
+            },
+            {
+                "title": "✅ Sauvegarde · Finalisation",
+                "msg": "Validation finale des écritures.",
+            },
+        ]
+
+        def _save_runner(push):
             try:
-                save_status.write("1/4 · Mise à jour des champs persistants joueur.")
+                push(
+                    "🧍 Sauvegarde · Profil", "- Écriture des contraintes persistantes…"
+                )
                 hard_no_merged = list(
                     dict.fromkeys(
                         [*hard_no, *([hard_no_other] if hard_no_other else [])]
@@ -1104,8 +1296,9 @@ def main() -> None:
                 )
 
                 if hard_no_other and is_host:
-                    save_status.write(
-                        '2/4 · Vérification typo/duplication pour "autre".'
+                    push(
+                        "🔤 Sauvegarde · Normalisation",
+                        '- Vérification typo/duplication pour "autre".',
                     )
                     _ = ensure_multiselect_option(
                         client,
@@ -1115,7 +1308,7 @@ def main() -> None:
                         similarity_threshold=0.90,
                     )
 
-                save_status.write("3/4 · Upsert des réponses par question.")
+                push("🗳️ Sauvegarde · Réponses", "- Écriture des réponses de session…")
                 upsert_response(
                     client,
                     responses_db_id,
@@ -1197,20 +1390,25 @@ def main() -> None:
                     tonight_note=tonight_note,
                 )
 
-                save_status.write("4/4 · Finalisation.")
-                save_status.update(label="✅ Réponses enregistrées.", state="complete")
+                push(
+                    "✅ Sauvegarde · Finalisation",
+                    "- Réponses enregistrées avec succès.",
+                )
                 st.success(
                     "✅ Merci. C'est noté. Tu peux modifier plus tard si besoin."
                 )
                 st.rerun()
             except Exception as exc:
-                save_status.update(
-                    label="⚠️ Erreur d'écriture base de données", state="error"
+                push(
+                    "❌ Sauvegarde · Échec",
+                    "- Impossible d'écrire dans la base Notion.",
                 )
                 st.error("⚠️ Erreur : impossible d'écrire dans base de données.")
                 detail = str(exc)
                 if is_host:
                     st.error(f"🔍 Détail : {detail}")
+
+        run_progress_expander(save_steps, _save_runner)
 
     if is_host:
         st.markdown("---")
@@ -1234,6 +1432,7 @@ def main() -> None:
                     normalize_label(new_option_label),
                     similarity_threshold=0.90,
                 )
+                _bust_cache()
                 if result["status"] == "added":
                     st.success(f"✅ Option ajoutée : {result['added']}")
                 elif result["status"] == "exists":
@@ -1246,11 +1445,14 @@ def main() -> None:
                 st.error("⚠️ Erreur : impossible de mettre à jour les options.")
                 st.error(f"🔍 Détail : {exc}")
 
-        responses = load_responses_by_session(
-            client,
-            responses_db_id,
-            responses_schema,
-            selected_session["id"],
+        responses = cached_read(
+            f"responses:{responses_db_id}:{selected_session['id']}",
+            lambda: load_responses_by_session(
+                client,
+                responses_db_id,
+                responses_schema,
+                selected_session["id"],
+            ),
         )
         render_host_view(players, questions, responses)
 
