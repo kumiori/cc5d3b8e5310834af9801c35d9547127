@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display&family=Inter:wght@300;600&display=swap');
+
+h1,
+h2,
+h3,
+[class*='css'] {
+    /* font-family: 'Libre Baskerville', serif !important; */
+    font-family: 'Playfair Display', serif !important;
+    /* font-size: 38px !important; */
+    /* font-weight: 500; */
+}
+
+p {
+    font-family: 'Libre Baskerville', serif;
+    font-size: 18px;
+    /* font-weight: 400; */
+}
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville&family=Inter:wght@300;600&display=swap');
+html,
+body,
+[class*='css'] {
+    font-family: 'Inter', sans-serif;
+}
+.title {
+    font-family: 'Libre Baskerville', serif;
+    font-size: 3em;
+    font-weight: 600;
+    margin-bottom: 0.2em;
+}
+.subtitle {
+    font-size: 1.3em;
+    color: #555;
+    margin-bottom: 1em;
+    text-transform: uppercase;
+}
+.section {
+    padding-top: 2em;
+    padding-bottom: 2em;
+}
