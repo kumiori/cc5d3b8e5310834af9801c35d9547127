@@ -1965,9 +1965,10 @@ def init_notion_repo(
             return _clean_notion_id(explicit_value)
         return _clean_notion_id(os.getenv(env_key, ""))
 
-    api_key = str(os.getenv("NOTION_TOKEN", "")).strip()
-    if not api_key:
-        st.warning("Clé API absente ; fonctions désactivées.")
+    try:
+        api_key = st.secrets["notion"]["api_key"]  # type: ignore[index]
+    except Exception:
+        st.warning("Notion API key missing; key minting disabled.")
         return None
 
     client = None
