@@ -23,7 +23,10 @@ def load_config() -> Dict[str, Any]:
 
 
 def _pick_id(key: str) -> str:
-    return str(os.getenv(key, "")).strip()
+    secrets_cfg = st.secrets.get("notion", {})
+    if key in secrets_cfg and secrets_cfg[key]:
+        return str(secrets_cfg[key])
+    return ""
 
 
 @st.cache_resource(show_spinner=False)
@@ -38,7 +41,9 @@ def get_notion_repo() -> Optional[NotionRepo]:
         decisions_db_id=_pick_id("AFF_DECISIONS_DB_ID"),
         highlights_db_id="",
     )
-    if repo and (not hasattr(repo, "list_decisions") or not hasattr(repo, "upsert_highlight")):
+    if repo and (
+        not hasattr(repo, "list_decisions") or not hasattr(repo, "upsert_highlight")
+    ):
         reset_notion_repo_cache()
         repo = init_notion_repo(
             session_db_id=_pick_id("AFF_SESSIONS_DB_ID"),

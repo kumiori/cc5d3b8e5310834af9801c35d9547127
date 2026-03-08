@@ -21,7 +21,7 @@ class Settings:
     proof_max_voice_bytes: int = _as_bytes(float(os.getenv("PROOF_VOICE_MAX_MB", "2")))
     request_timeout_s: float = float(os.getenv("REQUEST_TIMEOUT_S", "12.0"))
     show_debug: bool = os.getenv("DEBUG", "false").lower() == "true"
-    app_title: str = os.getenv("APP_TITLE", "Ice Ice Baby")
+    app_title: str = os.getenv("APP_TITLE", "Les Affranchi·e·s")
     accent_color: str = os.getenv("ACCENT_COLOR", "#1f1f1f")
 
 

@@ -1,0 +1,35 @@
+credentials:
+    webapp: iceice-baby
+    usernames:
+        demo_user:
+            email: demo@example.com
+            name: Demo User
+            password: '$2b$12$KBO8pyayUSzN9J5o/ezZ2OVqfxkgq4tGCh7zz3KEashEZwuB8f4B2' # demoPass123
+
+cookie:
+    name: iceice-baby
+    key: supersecret_cookie_key
+    expiry_days: 0.021
+
+pre-authorized:
+    emails:
+        - invitee@example.com
+
+app:
+    moderation:
+        multisig_n: 3
+    resonance:
+        allowed_values: [0.0, 0.25, 0.5, 0.75, 1.0]
+        labels:
+            '0.0': 'dissonance'
+            '0.25': 'low'
+            '0.5': 'neutral'
+            '0.75': 'high'
+            '1.0': 'full'
+
+auth:
+    emoji_suffix:
+        initial_k: 4
+        step_k: 2
+        max_k: 10
+    player_status_active_value: 'active'
