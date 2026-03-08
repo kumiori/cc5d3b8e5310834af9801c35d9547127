@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import traceback
 from collections import Counter
@@ -266,10 +265,17 @@ def now_iso() -> str:
     )
 
 
-def env_required(name: str) -> str:
-    value = str(os.getenv(name, "")).strip()
+def secret_required(name: str) -> str:
+    notion_cfg = st.secrets.get("notion", {})
+    value = str(notion_cfg.get(name, "")).strip()
     if not value:
-        raise RuntimeError(f"Variable d'environnement manquante : {name}")
+        value = str(notion_cfg.get(name.lower(), "")).strip()
+    if not value:
+        value = str(st.secrets.get(name, "")).strip()
+    if not value:
+        value = str(st.secrets.get(name.lower(), "")).strip()
+    if not value:
+        raise RuntimeError(f"Secret Notion manquant : notion.{name} (or top-level {name})")
     return value
 
 
@@ -1097,16 +1103,16 @@ def main() -> None:
         authenticator.logout(button_name="Se déconnecter", location="sidebar")
 
     try:
-        players_db_id = (repo.players_db_id or "").strip() or env_required(
+        players_db_id = (repo.players_db_id or "").strip() or secret_required(
             "AFF_PLAYERS_DB_ID"
         )
-        sessions_db_id = (repo.session_db_id or "").strip() or env_required(
+        sessions_db_id = (repo.session_db_id or "").strip() or secret_required(
             "AFF_SESSIONS_DB_ID"
         )
-        questions_db_id = (repo.questions_db_id or "").strip() or env_required(
+        questions_db_id = (repo.questions_db_id or "").strip() or secret_required(
             "AFF_QUESTIONS_DB_ID"
         )
-        responses_db_id = (repo.responses_db_id or "").strip() or env_required(
+        responses_db_id = (repo.responses_db_id or "").strip() or secret_required(
             "AFF_RESPONSES_DB_ID"
         )
     except Exception as exc:

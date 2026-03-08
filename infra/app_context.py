@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -24,43 +23,81 @@ def load_config() -> Dict[str, Any]:
 
 def _pick_id(key: str) -> str:
     secrets_cfg = st.secrets.get("notion", {})
-    if key in secrets_cfg and secrets_cfg[key]:
-        return str(secrets_cfg[key])
+    candidates = [key, key.lower()]
+    for candidate in candidates:
+        if candidate in secrets_cfg and secrets_cfg[candidate]:
+            return str(secrets_cfg[candidate])
+        if candidate in st.secrets and st.secrets[candidate]:
+            return str(st.secrets[candidate])
     return ""
 
 
-@st.cache_resource(show_spinner=False)
-def get_notion_repo() -> Optional[NotionRepo]:
-    repo = init_notion_repo(
-        session_db_id=_pick_id("AFF_SESSIONS_DB_ID"),
-        players_db_id=_pick_id("AFF_PLAYERS_DB_ID"),
-        statements_db_id=_pick_id("AFF_STATEMENTS_DB_ID"),
-        responses_db_id=_pick_id("AFF_RESPONSES_DB_ID"),
-        questions_db_id=_pick_id("AFF_QUESTIONS_DB_ID"),
-        moderation_votes_db_id=_pick_id("AFF_VOTES_DB_ID"),
-        decisions_db_id=_pick_id("AFF_DECISIONS_DB_ID"),
+@st.cache_resource(show_spinner=True)
+def _build_notion_repo_cached(
+    session_db_id: str,
+    players_db_id: str,
+    statements_db_id: str,
+    responses_db_id: str,
+    questions_db_id: str,
+    moderation_votes_db_id: str,
+    decisions_db_id: str,
+) -> Optional[NotionRepo]:
+    return init_notion_repo(
+        session_db_id=session_db_id,
+        players_db_id=players_db_id,
+        statements_db_id=statements_db_id,
+        responses_db_id=responses_db_id,
+        questions_db_id=questions_db_id,
+        moderation_votes_db_id=moderation_votes_db_id,
+        decisions_db_id=decisions_db_id,
         highlights_db_id="",
     )
-    if repo and (
-        not hasattr(repo, "list_decisions") or not hasattr(repo, "upsert_highlight")
-    ):
-        reset_notion_repo_cache()
-        repo = init_notion_repo(
-            session_db_id=_pick_id("AFF_SESSIONS_DB_ID"),
-            players_db_id=_pick_id("AFF_PLAYERS_DB_ID"),
-            statements_db_id=_pick_id("AFF_STATEMENTS_DB_ID"),
-            responses_db_id=_pick_id("AFF_RESPONSES_DB_ID"),
-            questions_db_id=_pick_id("AFF_QUESTIONS_DB_ID"),
-            moderation_votes_db_id=_pick_id("AFF_VOTES_DB_ID"),
-            decisions_db_id=_pick_id("AFF_DECISIONS_DB_ID"),
-            highlights_db_id="",
+
+
+def get_notion_repo() -> Optional[NotionRepo]:
+    session_db_id = _pick_id("AFF_SESSIONS_DB_ID")
+    players_db_id = _pick_id("AFF_PLAYERS_DB_ID")
+    statements_db_id = _pick_id("AFF_STATEMENTS_DB_ID")
+    responses_db_id = _pick_id("AFF_RESPONSES_DB_ID")
+    questions_db_id = _pick_id("AFF_QUESTIONS_DB_ID")
+    moderation_votes_db_id = _pick_id("AFF_VOTES_DB_ID")
+    decisions_db_id = _pick_id("AFF_DECISIONS_DB_ID")
+
+    missing: list[str] = []
+    if not session_db_id:
+        missing.append("AFF_SESSIONS_DB_ID / aff_sessions_db_id")
+    if not players_db_id:
+        missing.append("AFF_PLAYERS_DB_ID / aff_players_db_id")
+    if missing:
+        st.error("Secrets Notion manquants: " + ", ".join(missing))
+        return None
+
+    repo = _build_notion_repo_cached(
+        session_db_id=session_db_id,
+        players_db_id=players_db_id,
+        statements_db_id=statements_db_id,
+        responses_db_id=responses_db_id,
+        questions_db_id=questions_db_id,
+        moderation_votes_db_id=moderation_votes_db_id,
+        decisions_db_id=decisions_db_id,
+    )
+    if repo and (not repo.session_db_id or not repo.players_db_id):
+        _build_notion_repo_cached.clear()
+        repo = _build_notion_repo_cached(
+            session_db_id=session_db_id,
+            players_db_id=players_db_id,
+            statements_db_id=statements_db_id,
+            responses_db_id=responses_db_id,
+            questions_db_id=questions_db_id,
+            moderation_votes_db_id=moderation_votes_db_id,
+            decisions_db_id=decisions_db_id,
         )
     return repo
 
 
 def reset_notion_repo_cache() -> None:
     try:
-        get_notion_repo.clear()
+        _build_notion_repo_cached.clear()
     except Exception:
         pass
 

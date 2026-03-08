@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import inspect
-import os
 import re
 import time
 from datetime import datetime, timezone
@@ -31,9 +30,6 @@ HASH_FUNCS = {}
 if isinstance(Client, type):
     HASH_FUNCS[Client] = lambda _: 0
 
-
-SESSIONS_DB_ID = ""
-PLAYERS_DB_ID = ""
 
 DEBUG_NOTION = str(st.secrets.get("notion", {}).get("debug", "")).lower() in {
     "1",
@@ -244,7 +240,7 @@ class NotionRepo:
     def __init__(
         self,
         client: Client,
-        session_db_id: str = SESSIONS_DB_ID,
+        session_db_id: str = "",
         players_db_id: str = "",
         ideas_db_id: str = "",
         links_db_id: str = "",
@@ -1963,7 +1959,17 @@ def init_notion_repo(
     def _resolve_db_id(explicit_value: Optional[str], env_key: str) -> str:
         if explicit_value:
             return _clean_notion_id(explicit_value)
-        return _clean_notion_id(os.getenv(env_key, ""))
+        try:
+            secrets_cfg = st.secrets.get("notion", {})
+            candidates = [env_key, env_key.lower()]
+            for candidate in candidates:
+                if candidate in secrets_cfg and secrets_cfg[candidate]:
+                    return _clean_notion_id(str(secrets_cfg[candidate]))
+                if candidate in st.secrets and st.secrets[candidate]:
+                    return _clean_notion_id(str(st.secrets[candidate]))
+        except Exception:
+            pass
+        return ""
 
     try:
         api_key = st.secrets["notion"]["api_key"]  # type: ignore[index]
@@ -1975,11 +1981,7 @@ def init_notion_repo(
     try:
         from notion_client import Client
 
-        notion_version = None
-        if notion_version:
-            client = Client(auth=api_key, notion_version=notion_version)
-        else:
-            client = Client(auth=api_key)
+        client = Client(auth=api_key)
     except Exception as exc:  # pragma: no cover
         st.warning(f"Échec d'initialisation du SDK : {exc}")
 
@@ -2000,12 +2002,8 @@ def init_notion_repo(
     _ensure_base_url(client)
     _debug_client("notion.init", client)
 
-    resolved_session_db_id = _resolve_db_id(
-        session_db_id, "AFF_SESSIONS_DB_ID"
-    ) or _clean_notion_id(SESSIONS_DB_ID)
-    resolved_players_db_id = _resolve_db_id(
-        players_db_id, "AFF_PLAYERS_DB_ID"
-    ) or _clean_notion_id(PLAYERS_DB_ID)
+    resolved_session_db_id = _resolve_db_id(session_db_id, "AFF_SESSIONS_DB_ID")
+    resolved_players_db_id = _resolve_db_id(players_db_id, "AFF_PLAYERS_DB_ID")
     resolved_statements_db_id = _resolve_db_id(statements_db_id, "AFF_STATEMENTS_DB_ID")
     resolved_responses_db_id = _resolve_db_id(responses_db_id, "AFF_RESPONSES_DB_ID")
     resolved_questions_db_id = _resolve_db_id(questions_db_id, "AFF_QUESTIONS_DB_ID")
@@ -2014,6 +2012,17 @@ def init_notion_repo(
     )
     resolved_decisions_db_id = _resolve_db_id(decisions_db_id, "AFF_DECISIONS_DB_ID")
     resolved_highlights_db_id = _clean_notion_id(highlights_db_id or "")
+
+    missing_required: List[str] = []
+    if not resolved_session_db_id:
+        missing_required.append("AFF_SESSIONS_DB_ID (or aff_sessions_db_id)")
+    if not resolved_players_db_id:
+        missing_required.append("AFF_PLAYERS_DB_ID (or aff_players_db_id)")
+    if missing_required:
+        st.error(
+            "Notion DB IDs manquants dans les secrets: " + ", ".join(missing_required)
+        )
+        return None
 
     return NotionRepo(
         client,
