@@ -245,8 +245,19 @@ class AuthenticateWithKey:
         if token and not st.session_state.get("authentication_status"):
             self.auth_model.login(token.get("username", ""), callback=callback)
 
+        input_key = f"{key}-access-input"
+        prefill_key = str(st.session_state.pop("login_access_key_prefill", "")).strip()
+        if prefill_key:
+            st.session_state[input_key] = prefill_key
+            st.session_state["login_access_key_prefill_notice"] = (
+                "Your 4-emoji key has been prefilled."
+            )
+        notice = str(st.session_state.pop("login_access_key_prefill_notice", "")).strip()
+        if notice:
+            container.info(notice)
+
         with container.form(key):
-            access_key = st.text_input("Access key").strip()
+            access_key = st.text_input("Access key", key=input_key).strip()
             submit = st.form_submit_button("Open with key 🔑")
         if submit:
             success = self.auth_model.login(access_key, callback=callback)

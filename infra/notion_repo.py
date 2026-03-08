@@ -109,8 +109,7 @@ def _clean_notion_id(value: Optional[str]) -> str:
     if compact:
         token = compact.group(1).lower()
         return (
-            f"{token[0:8]}-{token[8:12]}-{token[12:16]}-"
-            f"{token[16:20]}-{token[20:32]}"
+            f"{token[0:8]}-{token[8:12]}-{token[12:16]}-{token[16:20]}-{token[20:32]}"
         )
     return raw
 
@@ -173,7 +172,7 @@ def _resolve_data_source_id(client: Client, database_or_source_id: str) -> str:
 def _cached_query(client: Client, database_id: str, **kwargs) -> Dict[str, Any]:
     db_id = _resolve_data_source_id(client, database_id)
     if not db_id:
-        raise ValueError("Missing Notion database/data source id for query.")
+        raise ValueError("Missing database/data source id for query.")
     _debug_client("notion.query", client)
     # if settings and getattr(settings, "show_debug", False):
     #     st.write(
@@ -188,14 +187,16 @@ def _cached_query(client: Client, database_id: str, **kwargs) -> Dict[str, Any]:
     if callable(ds_query):
         return _execute_with_retry(ds_query, data_source_id=db_id, **kwargs)
 
-    raise AttributeError("Notion client has no data_sources.query (requires notion-client 3.x)")
+    raise AttributeError(
+        "Notion client has no data_sources.query (requires notion-client 3.x)"
+    )
 
 
 @st.cache_data(ttl=5, show_spinner=False, hash_funcs=HASH_FUNCS)
 def _cached_retrieve(client: Client, database_id: str) -> Dict[str, Any]:
     db_id = _resolve_data_source_id(client, database_id)
     if not db_id:
-        raise ValueError("Missing Notion database/data source id for retrieve.")
+        raise ValueError("Missing database/data source id for retrieve.")
 
     data_sources_endpoint = getattr(client, "data_sources", None)
     ds_retrieve = (
@@ -206,7 +207,9 @@ def _cached_retrieve(client: Client, database_id: str) -> Dict[str, Any]:
     if callable(ds_retrieve):
         return _execute_with_retry(ds_retrieve, db_id)
 
-    raise AttributeError("Notion client has no data_sources.retrieve (requires notion-client 3.x)")
+    raise AttributeError(
+        "Notion client has no data_sources.retrieve (requires notion-client 3.x)"
+    )
 
 
 def _clear_query_cache():
@@ -236,7 +239,7 @@ def get_database_schema(client: Client, database_id: str) -> Dict[str, Any]:
 
 
 class NotionRepo:
-    """Thin repository around the Notion API."""
+    """Thin repository around the API."""
 
     def __init__(
         self,
@@ -298,12 +301,18 @@ class NotionRepo:
             }
         }
 
-    def _build_rich_text_chunks(self, name: str, value: str, chunk_size: int = 2000) -> Dict[str, Any]:
+    def _build_rich_text_chunks(
+        self, name: str, value: str, chunk_size: int = 2000
+    ) -> Dict[str, Any]:
         text = value or ""
-        chunks = [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)] or [""]
+        chunks = [
+            text[i : i + chunk_size] for i in range(0, len(text), chunk_size)
+        ] or [""]
         return {
             name: {
-                "rich_text": [{"type": "text", "text": {"content": chunk}} for chunk in chunks],
+                "rich_text": [
+                    {"type": "text", "text": {"content": chunk}} for chunk in chunks
+                ],
             }
         }
 
@@ -419,8 +428,10 @@ class NotionRepo:
     ) -> Dict[str, Any]:
         db_id = self._sessions_db_id(session_db_id)
         db_props = self._db_props(db_id)
-        session_code_prop = "session_code" if "session_code" in db_props else self._prop_name(
-            db_id, "Name", "title"
+        session_code_prop = (
+            "session_code"
+            if "session_code" in db_props
+            else self._prop_name(db_id, "Name", "title")
         )
         session_code_type = (
             db_props.get(session_code_prop, {}).get("type")
@@ -454,8 +465,10 @@ class NotionRepo:
     ) -> Optional[Dict[str, Any]]:
         db_id = self._sessions_db_id(session_db_id)
         db_props = self._db_props(db_id)
-        session_code_prop = "session_code" if "session_code" in db_props else self._prop_name(
-            db_id, "Name", "title"
+        session_code_prop = (
+            "session_code"
+            if "session_code" in db_props
+            else self._prop_name(db_id, "Name", "title")
         )
         session_code_type = (
             db_props.get(session_code_prop, {}).get("type")
@@ -576,8 +589,10 @@ class NotionRepo:
         if not isinstance(props, dict):
             props = {}
         db_props = self._db_props(db_id)
-        session_code_prop = "session_code" if "session_code" in db_props else self._prop_name(
-            db_id, "Name", "title"
+        session_code_prop = (
+            "session_code"
+            if "session_code" in db_props
+            else self._prop_name(db_id, "Name", "title")
         )
         session_code_type = (
             db_props.get(session_code_prop, {}).get("type")
@@ -1767,7 +1782,9 @@ class NotionRepo:
         end_prop = self._prop_name(db_id, "end_char", "number")
         props: Dict[str, Any] = {}
 
-        props.update(self._build_title(title_prop, f"{text_id}:{start_char}-{end_char}"))
+        props.update(
+            self._build_title(title_prop, f"{text_id}:{start_char}-{end_char}")
+        )
         props.update(self._build_rich_text(text_id_prop, text_id))
         props.update(self._build_rich_text(selected_prop, selected_text))
         props.update(self._build_number(start_prop, start_char))
@@ -1826,9 +1843,13 @@ class NotionRepo:
         ]
         if player_id:
             if self._prop_exists(db_id, "player"):
-                filters.append({"property": "player", "relation": {"contains": player_id}})
+                filters.append(
+                    {"property": "player", "relation": {"contains": player_id}}
+                )
             elif self._prop_exists(db_id, "player_id"):
-                filters.append({"property": "player_id", "rich_text": {"equals": player_id}})
+                filters.append(
+                    {"property": "player_id", "rich_text": {"equals": player_id}}
+                )
 
         response = _cached_query(
             self.client,
@@ -1856,7 +1877,9 @@ class NotionRepo:
             text_prop = self._prop_name(db_id, "text_id", "rich_text")
             filters.append({"property": text_prop, "rich_text": {"equals": text_id}})
         if session_id and self._prop_exists(db_id, "session"):
-            filters.append({"property": "session", "relation": {"contains": session_id}})
+            filters.append(
+                {"property": "session", "relation": {"contains": session_id}}
+            )
 
         filter_payload: Optional[Dict[str, Any]] = None
         if len(filters) == 1:
@@ -1944,7 +1967,7 @@ def init_notion_repo(
 
     api_key = str(os.getenv("NOTION_TOKEN", "")).strip()
     if not api_key:
-        st.warning("Clé API Notion absente ; fonctions Notion désactivées.")
+        st.warning("Clé API absente ; fonctions désactivées.")
         return None
 
     client = None
@@ -1957,7 +1980,7 @@ def init_notion_repo(
         else:
             client = Client(auth=api_key)
     except Exception as exc:  # pragma: no cover
-        st.warning(f"Échec d'initialisation du SDK Notion : {exc}")
+        st.warning(f"Échec d'initialisation du SDK : {exc}")
 
     if client is None and NotionConnection is not None:
         try:
@@ -1976,12 +1999,18 @@ def init_notion_repo(
     _ensure_base_url(client)
     _debug_client("notion.init", client)
 
-    resolved_session_db_id = _resolve_db_id(session_db_id, "AFF_SESSIONS_DB_ID") or _clean_notion_id(SESSIONS_DB_ID)
-    resolved_players_db_id = _resolve_db_id(players_db_id, "AFF_PLAYERS_DB_ID") or _clean_notion_id(PLAYERS_DB_ID)
+    resolved_session_db_id = _resolve_db_id(
+        session_db_id, "AFF_SESSIONS_DB_ID"
+    ) or _clean_notion_id(SESSIONS_DB_ID)
+    resolved_players_db_id = _resolve_db_id(
+        players_db_id, "AFF_PLAYERS_DB_ID"
+    ) or _clean_notion_id(PLAYERS_DB_ID)
     resolved_statements_db_id = _resolve_db_id(statements_db_id, "AFF_STATEMENTS_DB_ID")
     resolved_responses_db_id = _resolve_db_id(responses_db_id, "AFF_RESPONSES_DB_ID")
     resolved_questions_db_id = _resolve_db_id(questions_db_id, "AFF_QUESTIONS_DB_ID")
-    resolved_moderation_votes_db_id = _resolve_db_id(moderation_votes_db_id, "AFF_VOTES_DB_ID")
+    resolved_moderation_votes_db_id = _resolve_db_id(
+        moderation_votes_db_id, "AFF_VOTES_DB_ID"
+    )
     resolved_decisions_db_id = _resolve_db_id(decisions_db_id, "AFF_DECISIONS_DB_ID")
     resolved_highlights_db_id = _clean_notion_id(highlights_db_id or "")
 

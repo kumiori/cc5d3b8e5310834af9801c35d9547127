@@ -38,21 +38,18 @@ def main() -> None:
     apply_theme()
     ensure_session_state()
     sidebar_debug_state()
-
-    heading("Welcome")
-    microcopy("Enter your access token, emoji tail, or passphrase.")
-
+    # heading("Welcome")
     display_centered_prompt("Les Affranchi·e·s.")
     st.markdown(
         """
-### Les A. est un collectif créé en 2024 pour réunir des personnes qui se disent _affranchies du pouvoir_ et des _rapports de pouvoir dominants_, et qui s’efforcent de les traverser avec vertu, détachement et discernement.        """
+### Les Affranchi·e·s est un collectif créé en 2024 pour réunir des personnes qui se disent _affranchies du pouvoir_ et des _rapports de pouvoir dominants_, et qui s’efforcent de les traverser avec vertu, détachement et discernement.        """
     )
     st.divider()
 
     render_info_block(
         left_title="L'Idée",
         left_subtitle="\n",
-        right_content="est de créer un réseau d’entraide : lorsqu’on reconnaît un·e Affranchi·e, on sait qu’il ou elle est digne de confiance, fiable, précisément parce qu’il ou elle n’est pas mû·e par des dynamiques de domination.",
+        right_content="Est de créer un réseau d’entraide : lorsqu’on reconnaît un·e Affranchi·e, on sait qu’il ou elle est digne de confiance, fiable, précisément parce qu’il ou elle n’est pas mû·e par des dynamiques de domination.",
     )
 
     st.markdown(
@@ -84,75 +81,9 @@ def main() -> None:
     if authentication_status:
         authenticator.logout(button_name="Logout", location="sidebar")
 
-    with st.expander("Mint access token"):
-        st.caption("Create a single access token for a new collaborator.")
-        mint_role = st.selectbox(
-            "Role", ["Player", "Organiser"], index=0, key="mint-role"
-        )
-        mint_name = st.text_input("Display name (optional)", key="mint-name")
-        if st.button("Mint token", type="secondary", use_container_width=True):
-            with st.status(
-                "🔄 Création du jeton en cours...", expanded=True
-            ) as status_box:
-                status_box.write("1/5 · Vérification des paramètres.")
-                try:
-                    status_box.write("2/5 · Vérification de la session active.")
-                    with st.spinner("⏳ Création du jeton sur Notion..."):
-                        status_box.write(
-                            "3/5 · Génération de la clé et enregistrement Notion."
-                        )
-                        access_key, _, payload = authenticator.register_user(
-                            metadata={"name": mint_name, "role": mint_role}
-                        )
-                    status_box.write(
-                        "4/5 · Construction des projections (emoji, phrase)."
-                    )
-                except Exception as exc:
-                    status_box.update(
-                        label="❌ Échec pendant la création du jeton", state="error"
-                    )
-                    st.error(f"Minting failed: {exc}")
-                else:
-                    st.success("Token minted.")
-                    st.code(access_key or "", language="text")
-                    emoji_value = str(payload.get("emoji", ""))
-                    emoji_symbols = split_emoji_symbols(emoji_value)
-                    suffix_4 = (
-                        "".join(emoji_symbols[-4:]) if len(emoji_symbols) >= 4 else ""
-                    )
-                    suffix_6 = (
-                        "".join(emoji_symbols[-6:]) if len(emoji_symbols) >= 6 else ""
-                    )
-                    st.write("Emoji:", emoji_value or "—")
-                    st.write("Phrase:", payload.get("phrase", "—"))
-                    st.write("Emoji suffix 4:", suffix_4 or "—")
-                    st.write("Emoji suffix 6:", suffix_6 or "—")
-                    status_box.write("5/5 · Génération de la carte PDF en couleur.")
-                    pdf_bytes = build_credentials_pdf(
-                        access_key=str(access_key or ""),
-                        emoji=emoji_value,
-                        phrase=str(payload.get("phrase", "")),
-                        nickname=str(mint_name or ""),
-                        role=str(mint_role or "guest"),
-                        title="Carte d'acces",
-                    )
-                    filename = (
-                        f"affranchis-cle-{datetime.now().strftime('%Y%m%d-%H%M%S')}.pdf"
-                    )
-                    st.download_button(
-                        "Télécharger la carte PDF",
-                        data=pdf_bytes,
-                        file_name=filename,
-                        mime="application/pdf",
-                        use_container_width=True,
-                    )
-                    status_box.update(
-                        label="✅ Jeton prêt et carte générée", state="complete"
-                    )
-
     if authentication_status:
         st.info(
-            "We baked a cookie for you for 30 minutes. This keeps you signed in while you navigate."
+            "Nous avons préparé un cookie pour vous pendant 30 minutes. Cela vous permet de rester connecté pendant que vous naviguez."
         )
         session = get_active_session(repo)
         if session:
@@ -164,11 +95,11 @@ def main() -> None:
             salt,
         )
         st.session_state["anon_token"] = anon_token
-        st.success(f"Access granted for {name or 'collaborator'}.")
-        if st.button("Enter lobby", type="secondary", use_container_width=True):
+        st.success(f"Accès accordé pour {name or 'collaborateur'}.")
+        if st.button("Entre", type="secondary", use_container_width=True):
             st.switch_page("pages/02_Home.py")
     elif authentication_status is False:
-        st.error("Key invalid or ambiguous. Try full hash or more emoji.")
+        st.error("Clé invalide ou ambiguë. Essaye la chaine complète ou plus d'émojis.")
 
 
 if __name__ == "__main__":

@@ -43,14 +43,26 @@ def main() -> None:
     )
 
     st.write("Actions rapides")
-    if st.button("Passer aux décisions", use_container_width=True):
+    if st.button("Préferences cuisine", use_container_width=True):
+        st.switch_page("pages/01_Cuisine.py")
+    if st.button(
+        "Décisions (après dinêr, si affinités)", disabled=True, use_container_width=True
+    ):
         st.switch_page("pages/05_Decisions.py")
-    if st.button("Tableau de coordination", use_container_width=True):
+    if st.button(
+        "Coordination (après dinêr, si affinités)",
+        disabled=True,
+        use_container_width=True,
+    ):
         st.switch_page("pages/06_Coordination.py")
-    if st.button("Carte en direct", use_container_width=True):
+    if st.button(
+        "Tableau de bord (après dinêr, si affinités)",
+        disabled=True,
+        use_container_width=True,
+    ):
         st.switch_page("pages/03_Resonance.py")
 
-    st.button("Demander à une scientifique", disabled=True, use_container_width=True)
+    st.button("Pose une question", disabled=True, use_container_width=True)
     if st.session_state.get("authentication_status"):
         authenticator.logout(button_name="Se déconnecter", location="sidebar")
     if repo and st.session_state.get("session_id"):
