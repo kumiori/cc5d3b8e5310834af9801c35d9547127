@@ -245,6 +245,13 @@ class AuthenticateWithKey:
         if token and not st.session_state.get("authentication_status"):
             self.auth_model.login(token.get("username", ""), callback=callback)
 
+        if location in {"hidden", "cookie-only", "none"}:
+            return (
+                st.session_state.get("name"),
+                st.session_state.get("authentication_status"),
+                st.session_state.get("username"),
+            )
+
         input_key = f"{key}-access-input"
         prefill_key = str(st.session_state.pop("login_access_key_prefill", "")).strip()
         if prefill_key:

@@ -22,8 +22,8 @@ def apply_theme() -> None:
     css_path = Path("assets/styles.css")
     if css_path.exists():
         css = css_path.read_text(encoding="utf-8")
-        # accent_override = f":root {{ --accent: {settings.accent_color}; }}"
-        # st.markdown(f"<style>{css}{accent_override}</style>", unsafe_allow_html=True)
+        accent_override = f":root {{ --accent: {settings.accent_color}; }}"
+        st.markdown(f"<style>{css}{accent_override}</style>", unsafe_allow_html=True)
 
 
 def heading(text: str) -> None:

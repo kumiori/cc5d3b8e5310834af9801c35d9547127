@@ -6,7 +6,7 @@ import re
 import traceback
 from collections import Counter
 from datetime import datetime, timezone
-from time import perf_counter, time
+from time import perf_counter, sleep, time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -150,6 +150,21 @@ def timed_call(label: str, fn):
     finally:
         elapsed_ms = (perf_counter() - started) * 1000
         LOGGER.info("perf.%s_ms=%.1f", label, elapsed_ms)
+
+
+def _stream_chunk(text: str, *, punctuation_pause: float = 0.08):
+    words = text.split(" ")
+    for idx, word in enumerate(words):
+        token = word
+        if idx < len(words) - 1:
+            token += " "
+        yield token
+        delay = 0.032
+        if token.endswith((".", "!", "?")):
+            delay += punctuation_pause
+        elif token.endswith((",", ";", ":")):
+            delay += punctuation_pause * 0.6
+        sleep(delay)
 
 
 def run_progress_expander(steps: List[Dict[str, str]], runner):
@@ -1215,8 +1230,6 @@ def main() -> None:
         ),
     )
 
-    st.caption("Tu peux répondre en 3 minutes. Tes contraintes passent avant tout.")
-
     logged_player_page_id = str(st.session_state.get("player_page_id", "")).strip()
     if not logged_player_page_id:
         st.error("⚠️ Erreur : identité affranchi•e manquante, reconnecte-toi.")
@@ -1233,6 +1246,43 @@ def main() -> None:
     )
     if not logged_player:
         st.error("⚠️ Erreur : affranchi•e introuvable dans la base joueurs.")
+        st.stop()
+
+    intro_play_key = (
+        f"aff_cuisine_intro_played:{selected_session['id']}:{logged_player_page_id}"
+    )
+    intro_start_key = (
+        f"aff_cuisine_intro_started:{selected_session['id']}:{logged_player_page_id}"
+    )
+    if not bool(st.session_state.get(intro_start_key, False)):
+        if not bool(st.session_state.get(intro_play_key, False)):
+            if st.button("Afficher tout", key=f"{intro_play_key}:skip"):
+                st.session_state[intro_play_key] = True
+                st.rerun()
+            st.write_stream(_stream_chunk("### Bienvenue", punctuation_pause=0.14))
+            sleep(0.45)
+            st.write_stream(
+                _stream_chunk("La session commence par quelques réponses simples.")
+            )
+            sleep(0.4)
+            st.write_stream(
+                _stream_chunk(
+                    "Tu peux répondre en quelques minutes. Tes contraintes passent avant tout."
+                )
+            )
+            sleep(0.34)
+            st.write_stream(_stream_chunk("Ta réponse aide à préparer la suite."))
+            st.session_state[intro_play_key] = True
+        else:
+            st.markdown("### Bienvenue")
+            st.markdown("La session commence par quelques réponses simples.")
+            st.markdown(
+                "Tu peux répondre en quelques minutes. Tes contraintes passent avant tout."
+            )
+            st.markdown("Taes réponses aident à préparer la suite.")
+        if st.button("Je commence", type="primary", use_container_width=True):
+            st.session_state[intro_start_key] = True
+            st.rerun()
         st.stop()
 
     presence_touch_key = (
@@ -1286,32 +1336,35 @@ def main() -> None:
             active_12h,
         )
     st.metric(
-        "# of affranchi•e•s acti•fs•vs dans les dernières 12 heures",
+        "Affranchi·e·s actif·ve·s ces 12 dernières heures",
         value=active_12h,
     )
 
-    st.markdown("## 0) Participation")
+    st.markdown("## 0 · Participation")
     participate = st.radio(
         f"Je vais participer à la session « {selected_session['code']} » ?",
         options=["Oui", "Non"],
         horizontal=True,
     )
-    if participate == "Non":
-        st.info("Merci. Tu pourras revenir plus tard si tu changes d'avis.")
-        st.stop()
+    if participate == "Oui":
+        st.caption("Ta participation sera signalée à l’équipe cuisine.")
+    else:
+        st.caption("Tu peux poursuivre sans participer à cette partie.")
 
-    player_state_key = (
-        f"aff_participation_ok:{selected_session['id']}:{logged_player_page_id}"
+    participation_confirm_key = (
+        f"aff_participation_confirmed:{selected_session['id']}:{logged_player_page_id}"
+    )
+    participation_choice_key = (
+        f"aff_participation_choice:{selected_session['id']}:{logged_player_page_id}"
     )
     already_in_session = any(p.get("id") == logged_player_page_id for p in players)
-    if already_in_session and not st.session_state.get(player_state_key):
-        st.session_state[player_state_key] = True
+    if already_in_session and participation_choice_key not in st.session_state:
+        st.session_state[participation_choice_key] = "Oui"
+        st.session_state[participation_confirm_key] = True
 
-    if not st.session_state.get(player_state_key):
-        st.info("👉 Clique ☝︎ pour le communiquer à la cuisine.")
-        if st.button(
-            "Confirmer ma participation", type="primary", use_container_width=True
-        ):
+    if st.button("Confirmer", type="primary", use_container_width=True):
+        st.session_state[participation_choice_key] = participate
+        if participate == "Oui":
             join_steps = [
                 {
                     "title": "🔄 Participation · Démarrage",
@@ -1322,7 +1375,7 @@ def main() -> None:
                     "msg": "Vérification du lien participant-session.",
                 },
                 {
-                    "title": "🧾 Participation · Écriture",
+                    "title": "🧾 Étape suivante · Écriture",
                     "msg": "Écriture en base Notion du lien de participation.",
                 },
             ]
@@ -1330,7 +1383,7 @@ def main() -> None:
             def _join_runner(push):
                 try:
                     push(
-                        "🧾 Participation · Écriture",
+                        "🧾 Étape suivante · Écriture",
                         "- Écriture en base Notion en cours…",
                     )
                     link_player_to_session(
@@ -1339,7 +1392,7 @@ def main() -> None:
                         logged_player_page_id,
                         selected_session["id"],
                     )
-                    st.session_state[player_state_key] = True
+                    st.session_state[participation_confirm_key] = True
                     push(
                         "✅ Participation · Terminée",
                         f"- Participation confirmée pour **{logged_player['name']}**.",
@@ -1355,6 +1408,11 @@ def main() -> None:
                     st.stop()
 
             run_progress_expander(join_steps, _join_runner)
+        else:
+            st.session_state[participation_confirm_key] = True
+            st.rerun()
+
+    if not bool(st.session_state.get(participation_confirm_key, False)):
         st.stop()
 
     players = timed_call(
@@ -1739,13 +1797,42 @@ def main() -> None:
             and last_save.get("session_id") == selected_session["id"]
             and bool(st.session_state.get("aff_show_save_success_once", False))
         ):
-            st.success("Everything has been saved.")
+            stream_key = "aff_save_confirmation_streamed"
+            if not bool(st.session_state.get(stream_key, False)):
+                st.write_stream(
+                    _stream_chunk("Réponse enregistrée", punctuation_pause=0.14)
+                )
+                sleep(0.42)
+                st.write_stream(
+                    _stream_chunk("Merci. Ton signal a bien été pris en compte.")
+                )
+                sleep(0.36)
+                st.write_stream(
+                    _stream_chunk(
+                        "Tu peux maintenant attendre la suite ou revenir plus tard avec ta clé."
+                    )
+                )
+                st.session_state[stream_key] = True
+            else:
+                st.success("Réponse enregistrée")
+                st.caption("Merci. Ton signal a bien été pris en compte.")
+                st.caption(
+                    "Tu peux maintenant attendre la suite ou revenir plus tard avec ta clé."
+                )
             if st.session_state.pop("aff_show_balloons", False):
                 st.balloons()
             st.markdown(
                 f"<p style='font-size:1.45rem; line-height:1.5; font-weight:600; margin: 0.25rem 0 0.75rem 0;'>{short_save_summary(last_save.get('summary', {}))}</p>",
                 unsafe_allow_html=True,
             )
+            col_done, col_review = st.columns(2)
+            with col_done:
+                if st.button("Terminer", type="primary", use_container_width=True):
+                    st.switch_page("pages/02_Home.py")
+            with col_review:
+                if st.button("Revoir mes réponses", use_container_width=True):
+                    st.session_state["aff_show_save_success_once"] = False
+                    st.rerun()
             st.session_state["aff_show_save_success_once"] = False
 
     if submit_now:
@@ -2004,6 +2091,7 @@ def main() -> None:
                     "summary": summary,
                 }
                 st.session_state["aff_show_save_success_once"] = True
+                st.session_state["aff_save_confirmation_streamed"] = False
                 LOGGER.info(
                     "save.success session_id=%s player_id=%s summary=%s",
                     selected_session["id"],

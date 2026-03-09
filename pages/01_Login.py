@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+import time
 from typing import Any, Dict
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from infra.app_context import get_authenticator, get_notion_repo
-from infra.app_state import ensure_session_state
+from infra.app_state import ensure_session_state, remember_access
 from infra.credentials_pdf import build_credentials_pdf
 from infra.key_codec import split_emoji_symbols
 from ui import (
@@ -19,6 +21,7 @@ from ui import (
 
 MINT_RESULT_KEY = "splash_mint_result"
 OPEN_MINT_KEY = "focus_mint_token"
+ACCESS_SHOW_LOGIN_FORM = "access_show_login_form"
 
 
 def _build_mint_result(
@@ -49,29 +52,67 @@ def _build_mint_result(
     }
 
 
+def _stream_chunk(text: str, *, punctuation_pause: float = 0.08):
+    words = text.split(" ")
+    for idx, word in enumerate(words):
+        token = word
+        if idx < len(words) - 1:
+            token += " "
+        yield token
+        delay = 0.035
+        if token.endswith((".", "!", "?")):
+            delay += punctuation_pause
+        elif token.endswith((",", ";", ":")):
+            delay += punctuation_pause * 0.6
+        time.sleep(delay)
+
+
+def _stream_access_intro(skip: bool = False) -> None:
+    if skip:
+        st.markdown("## Accès")
+        st.markdown("Chaque participant·e entre avec une clé personnelle.")
+        st.markdown("Si tu en as déjà une, connecte-toi. Sinon, crée-la ici.")
+        return
+    st.write_stream(_stream_chunk("Accès", punctuation_pause=0.14))
+    time.sleep(0.48)
+    st.write_stream(
+        _stream_chunk("Chaque participant·e entre avec une clé personnelle.")
+    )
+    time.sleep(0.4)
+    st.write_stream(
+        _stream_chunk("Si tu en as déjà une, connecte-toi. Sinon, crée-la ici.")
+    )
+
+
 def _render_access_cta() -> None:
-    display_centered_prompt("Access")
-    st.markdown("### This session ...")
-    st.markdown("## Each player enters using a unique access key.")
+    st.session_state.setdefault("access_intro_played", False)
+    if not st.session_state["access_intro_played"]:
+        if st.button("Afficher tout", key="access-intro-skip"):
+            st.session_state["access_intro_played"] = True
+            st.rerun()
+        _stream_access_intro(skip=False)
+        st.session_state["access_intro_played"] = True
+    else:
+        _stream_access_intro(skip=True)
 
     col_login, col_create = st.columns(2)
 
     with col_login:
-        st.markdown("## I already have an access key")
-        st.caption("And I am ready to participate.")
+        st.markdown("## J’ai déjà une clé")
+        st.caption("Je suis prêt·e à entrer.")
         if st.button(
-            "🔑 Tell the Kitchen",
+            "Se connecter",
             type="secondary",
             use_container_width=True,
             key="splash-go-login",
         ):
-            st.switch_page("pages/01_Cuisine.py")
+            st.session_state[ACCESS_SHOW_LOGIN_FORM] = True
 
     with col_create:
-        st.markdown("## Create a new access key")
-        st.caption("Generate your personal token to participate.")
+        st.markdown("## Créer une clé")
+        st.caption("Générer mon accès personnel.")
         if st.button(
-            "✨ Create Access Key",
+            "Créer ma clé",
             type="primary",
             use_container_width=True,
             key="splash-create-key",
@@ -79,31 +120,59 @@ def _render_access_cta() -> None:
             st.session_state[OPEN_MINT_KEY] = True
             st.rerun()
 
+    with st.expander("Qu’est-ce qu’une clé ?", expanded=False):
+        st.write(
+            "La clé permet de reconnaître un·e affranchi·e sur cette forme-plate, "
+            "sans exposer une identité publique."
+        )
+
+
+def _render_login_panel(authenticator: Any) -> None:
+    if st.session_state.get(MINT_RESULT_KEY):
+        return
+    if not bool(st.session_state.get(ACCESS_SHOW_LOGIN_FORM, False)):
+        return
+    st.markdown("### Connexion")
+    _, authentication_status, _ = authenticator.login(
+        location="main",
+        key="access-login-form",
+        callback=remember_access,
+    )
+    if authentication_status:
+        st.success("Accès validé.")
+        if st.button(
+            "Continuer",
+            type="primary",
+            use_container_width=True,
+            key="access-login-continue-btn",
+        ):
+            st.switch_page("pages/01_Cuisine.py")
+
 
 def _render_mint_panel(authenticator: Any) -> None:
     st.session_state.setdefault(MINT_RESULT_KEY, None)
     open_mint = bool(st.session_state.pop(OPEN_MINT_KEY, False))
 
-    with st.expander("Mint access token", expanded=open_mint):
+    with st.expander("Détails de la clé", expanded=open_mint):
         st.caption(
-            "All sessions are designed to be anonymous. Your access key is personal and "
-            "must be stored securely. If you add an email, it is used only to send a credentials reminder."
+            "La clé est personnelle. Si tu indiques un email, il sert uniquement au rappel."
         )
-        st.markdown("### Now login with your access key to join the lobby")
+        st.markdown("### Crée ta clé d’accès")
 
         with st.form("splash-mint-token-form"):
-            mint_name = st.text_input("Name or nickname", key="splash-mint-name")
-            mint_intent = st.text_input(
-                "What is your motivation? (optional)",
-                key="splash-mint-intent",
-                max_chars=120,
-            )
+            mint_name = st.text_input("Nom ou pseudo", key="splash-mint-name")
+            # mint_intent = st.text_input(
+            #     "What is your motivation? (optional)",
+            #     key="splash-mint-intent",
+            #     max_chars=120,
+            # )
+            mint_intent = ""
             mint_email = st.text_input(
-                "Email (optional, for credentials reminder)",
+                "Email (optionnel, pour retrouver la clé)",
                 key="splash-mint-email",
             )
             mint_submit = st.form_submit_button(
-                "Create Access Key",
+                "Créer ma clé",
                 type="primary",
                 use_container_width=True,
             )
@@ -111,9 +180,8 @@ def _render_mint_panel(authenticator: Any) -> None:
         if not mint_submit:
             return
 
-        with st.status("Minting access key...", expanded=True) as status:
+        with st.spinner("Création de la clé en cours..."):
             try:
-                status.write("1/3 · Creating key in database.")
                 access_key, _, payload = authenticator.register_user(
                     metadata={
                         "name": mint_name,
@@ -122,25 +190,43 @@ def _render_mint_panel(authenticator: Any) -> None:
                         "role": "Player",
                     }
                 )
-                status.write("2/3 · Preparing access card PDF.")
                 st.session_state[MINT_RESULT_KEY] = _build_mint_result(
                     access_key=str(access_key or ""),
                     payload=payload,
                     mint_name=mint_name,
                 )
-                status.write("3/3 · Ready.")
-                status.update(label="Minting complete", state="complete")
+                st.session_state["access_key_created_stream"] = False
+                st.session_state["access_mint_key_copied"] = False
+                st.rerun()
             except Exception as exc:
-                status.update(label="Minting failed", state="error")
                 st.error(f"Minting failed: {exc}")
 
 
-def _render_mint_result() -> None:
+def _render_mint_result(authenticator: Any) -> None:
     mint_result = st.session_state.get(MINT_RESULT_KEY)
     if not mint_result:
         return
 
-    st.success("Token minted.")
+    st.success(
+        f"La clée est prète, cela a pris {st.session_state.get('mint_duration', 'un certain temps')}."
+    )
+    st.session_state.setdefault("access_key_created_stream", False)
+    if not st.session_state["access_key_created_stream"]:
+        st.write_stream(_stream_chunk("Clé créée", punctuation_pause=0.14))
+        time.sleep(0.4)
+        st.write_stream(_stream_chunk("Tu peux maintenant entrer dans la session."))
+        time.sleep(0.36)
+        st.write_stream(
+            _stream_chunk(
+                "Copie-la, garde cette clé, et entre dans la plateforme. Elle te permettra de revenir et de poursuivre."
+            )
+        )
+        st.session_state["access_key_created_stream"] = True
+    else:
+        st.markdown("### Clé créée")
+        st.markdown("Tu peux maintenant entrer dans la session.")
+        st.markdown("Garde cette clé. Elle te permettra de revenir et de poursuivre.")
+
     st.markdown("### Your handy access key (emoji-4)")
     st.markdown(
         f"<div style='font-size:4.1rem;line-height:1.2;text-align:center'>{mint_result.get('emoji4', '—')}</div>",
@@ -167,17 +253,65 @@ def _render_mint_result() -> None:
         key="splash-mint-download-pdf",
     )
 
-    if st.button(
-        "Go to Login with emoji-4", type="secondary", use_container_width=True
-    ):
-        st.session_state["login_access_key_prefill"] = str(
-            mint_result.get("emoji4", "")
-        ).strip()
-        st.session_state["login_access_key_prefill_notice"] = (
-            "Going to login. Reloading with your 4-emoji key prefilled."
-        )
-        st.info("Going to login. Reloading now...")
-        st.switch_page("pages/01_Login.py")
+    # with st.container(border=True,):
+    #     st.markdown("#### Clé d’accès")
+    #     st.code(str(mint_result.get("access_key", "")), language="text")
+
+    st.session_state.setdefault("access_mint_key_copied", False)
+    key_copied = bool(st.session_state.get("access_mint_key_copied", False))
+
+    col_continue, col_copy = st.columns(2)
+    with col_continue:
+        if st.button(
+            "Continuer",
+            type="primary" if key_copied else "secondary",
+            use_container_width=True,
+            key="access-mint-continue-btn",
+        ):
+            full_key = str(mint_result.get("access_key", "")).strip()
+            auto_login_ok = False
+            if full_key:
+                try:
+                    auto_login_ok = bool(
+                        authenticator.auth_model.login(
+                            full_key, callback=remember_access
+                        )
+                    )
+                    if auto_login_ok:
+                        authenticator.cookie_controller.set_cookie()
+                except Exception:
+                    auto_login_ok = False
+
+            if auto_login_ok:
+                st.switch_page("pages/01_Cuisine.py")
+            else:
+                st.session_state["login_access_key_prefill"] = str(
+                    mint_result.get("emoji4", "")
+                ).strip()
+                st.session_state["login_access_key_prefill_notice"] = (
+                    "Connexion automatique indisponible. Ta clé emoji-4 est préremplie."
+                )
+                st.session_state[ACCESS_SHOW_LOGIN_FORM] = True
+                st.error("Impossible de te connecter automatiquement. Entre la clé.")
+                st.rerun()
+    with col_copy:
+        if st.button(
+            "Copier la clé pour sauvegarder",
+            use_container_width=True,
+            key="access-mint-copy-btn",
+            type="secondary" if key_copied else "primary",
+        ):
+            key_text = (
+                str(mint_result.get("access_key", ""))
+                .replace("\\", "\\\\")
+                .replace("'", "\\'")
+            )
+            components.html(
+                f"<script>navigator.clipboard.writeText('{key_text}');</script>",
+                height=0,
+            )
+            st.session_state["access_mint_key_copied"] = True
+            st.toast("Clé copiée.")
 
 
 def main() -> None:
@@ -186,13 +320,14 @@ def main() -> None:
     ensure_session_state()
     sidebar_debug_state()
 
-    microcopy("This is the entry point for access.")
+    microcopy("Entrée d’accès.")
     repo = get_notion_repo()
     authenticator = get_authenticator(repo)
 
     _render_access_cta()
+    _render_login_panel(authenticator)
     _render_mint_panel(authenticator)
-    _render_mint_result()
+    _render_mint_result(authenticator)
 
 
 if __name__ == "__main__":
