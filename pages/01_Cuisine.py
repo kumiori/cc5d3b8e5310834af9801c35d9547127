@@ -6,6 +6,7 @@ import re
 import traceback
 from collections import Counter
 from datetime import datetime, timezone
+from time import perf_counter, time
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -17,7 +18,6 @@ from infra.app_state import (
     ensure_auth,
     ensure_session_state,
     remember_access,
-    require_login,
 )
 from infra.notion_repo import get_database_schema
 from lib.notion_options import ensure_multiselect_option
@@ -74,10 +74,18 @@ QUESTION_CATALOG: List[Dict[str, Any]] = [
         "max_select": 2,
         "order": 6,
     },
+    {
+        "key": "contribution",
+        "prompt": "Contribution",
+        "kind": "preference",
+        "qtype": "single",
+        "required": True,
+        "order": 7,
+    },
 ]
 
-NECESSARY_KEYS = ["diet", "allergens", "hard_no", "spice"]
-EXTENDED_ONLY_KEYS = ["texture", "cravings"]
+NECESSARY_KEYS = ["allergens", "contribution"]
+EXTENDED_ONLY_KEYS = ["diet", "hard_no", "spice", "texture", "cravings"]
 
 CRAVINGS_OPTIONS = [
     "frais",
@@ -135,6 +143,15 @@ def cached_read(cache_key: str, loader):
     return value
 
 
+def timed_call(label: str, fn):
+    started = perf_counter()
+    try:
+        return fn()
+    finally:
+        elapsed_ms = (perf_counter() - started) * 1000
+        LOGGER.info("perf.%s_ms=%.1f", label, elapsed_ms)
+
+
 def run_progress_expander(steps: List[Dict[str, str]], runner):
     placeholder = st.empty()
 
@@ -182,11 +199,12 @@ def short_save_summary(summary: Dict[str, Any]) -> str:
     preferences = ", ".join(summary.get("diet") or []) or "—"
     allergens = ", ".join(summary.get("allergens") or []) or "none"
     hard_no = ", ".join(summary.get("hard_no") or []) or "none"
-    contrib = summary.get("contribution", 0)
+    contrib = summary.get("contribution")
+    contrib_txt = "—" if contrib is None else str(contrib)
     cravings = ", ".join(summary.get("cravings") or []) or "—"
     return (
         f"My preferences: {preferences} · Allergens: {allergens} · No ingredients: {hard_no} · "
-        f"Contribution: {contrib} · Cravings: {cravings}"
+        f"Contribution: {contrib_txt} · Cravings: {cravings}"
     )
 
 
@@ -198,11 +216,13 @@ def ensure_questionnaire_state(
     state_key = f"{session_id}:{player_id}"
     current_key = str(st.session_state.get("aff_form_state_key", ""))
     if current_key != state_key:
+        initial_allergens = list(selected_player.get("allergens", []))
         st.session_state["aff_form_state_key"] = state_key
         st.session_state["aff_form_index"] = 0
         st.session_state["aff_form_values"] = {
             "diet": list(selected_player.get("diet", [])),
-            "allergens": list(selected_player.get("allergens", [])),
+            "allergens": initial_allergens,
+            "allergens_mode": "Known allergens" if initial_allergens else "",
             "hard_no": list(selected_player.get("hard_no", [])),
             "allergen_other": "",
             "allergens_none_known": False,
@@ -214,9 +234,9 @@ def ensure_questionnaire_state(
             "pref_oignon": "ok",
             "pref_coriandre": "ok",
             "cravings": [],
-            "contribution_choice": "0",
+            "contribution_choice": "",
             "contribution_custom": "",
-            "contribution_value": 0.0,
+            "contribution_value": None,
             "bio_note": selected_player.get("bio_note", ""),
         }
     return state_key
@@ -237,8 +257,11 @@ def _required_answered(question_key: str, values: Dict[str, Any]) -> bool:
             and len(values.get("hard_no") or []) > 0
         ) or bool(custom)
     if question_key == "allergens":
-        if bool(values.get("allergens_none_known", False)):
+        mode = str(values.get("allergens_mode", "")).strip()
+        if mode == "None known":
             return True
+        if mode != "Known allergens":
+            return False
         custom = parse_csv_labels(values.get("allergen_other", ""))
         return (
             isinstance(values.get("allergens"), list)
@@ -275,7 +298,9 @@ def secret_required(name: str) -> str:
     if not value:
         value = str(st.secrets.get(name.lower(), "")).strip()
     if not value:
-        raise RuntimeError(f"Secret Notion manquant : notion.{name} (or top-level {name})")
+        raise RuntimeError(
+            f"Secret Notion manquant : notion.{name} (or top-level {name})"
+        )
     return value
 
 
@@ -1079,6 +1104,7 @@ def render_host_view(
 
 
 def main() -> None:
+    page_started = perf_counter()
     st.set_page_config(
         page_title="Les Affranchis · Cuisine",
         page_icon="🍲",
@@ -1087,7 +1113,7 @@ def main() -> None:
     st.title("Les Affranchis · Cuisine")
 
     ensure_session_state()
-    repo = get_notion_repo()
+    repo = timed_call("repo_init", get_notion_repo)
     if not repo:
         st.error("⚠️ Erreur : connexion Notion indisponible.")
         st.stop()
@@ -1095,12 +1121,15 @@ def main() -> None:
     _, authentication_status, _ = ensure_auth(
         authenticator,
         callback=remember_access,
-        key="affranchis-cuisine-login",
-        location="sidebar",
+        key="affranchis-cuisine-cookie-auth",
+        location="hidden",
     )
-    require_login()
-    if authentication_status:
-        authenticator.logout(button_name="Se déconnecter", location="sidebar")
+    if not authentication_status:
+        st.warning("Please log in first.")
+        if st.button("Go to Access", type="primary", use_container_width=True):
+            st.switch_page("pages/01_Login.py")
+        st.stop()
+    authenticator.logout(button_name="Se déconnecter", location="sidebar")
 
     try:
         players_db_id = (repo.players_db_id or "").strip() or secret_required(
@@ -1122,30 +1151,45 @@ def main() -> None:
     client = repo.client
 
     try:
-        sessions_schema = cached_read(
-            f"schema:{sessions_db_id}",
-            lambda: safe_get_schema(client, sessions_db_id),
+        sessions_schema = timed_call(
+            "schema_sessions",
+            lambda: cached_read(
+                f"schema:{sessions_db_id}",
+                lambda: safe_get_schema(client, sessions_db_id),
+            ),
         )
-        players_schema = cached_read(
-            f"schema:{players_db_id}",
-            lambda: safe_get_schema(client, players_db_id),
+        players_schema = timed_call(
+            "schema_players",
+            lambda: cached_read(
+                f"schema:{players_db_id}",
+                lambda: safe_get_schema(client, players_db_id),
+            ),
         )
-        questions_schema = cached_read(
-            f"schema:{questions_db_id}",
-            lambda: safe_get_schema(client, questions_db_id),
+        questions_schema = timed_call(
+            "schema_questions",
+            lambda: cached_read(
+                f"schema:{questions_db_id}",
+                lambda: safe_get_schema(client, questions_db_id),
+            ),
         )
-        responses_schema = cached_read(
-            f"schema:{responses_db_id}",
-            lambda: safe_get_schema(client, responses_db_id),
+        responses_schema = timed_call(
+            "schema_responses",
+            lambda: cached_read(
+                f"schema:{responses_db_id}",
+                lambda: safe_get_schema(client, responses_db_id),
+            ),
         )
     except Exception as exc:
         st.error("⚠️ Erreur : impossible d'initialiser les schémas base de données.")
         st.error(f"🔍 Détail : {exc}")
         st.stop()
 
-    sessions = cached_read(
-        f"sessions:{sessions_db_id}",
-        lambda: list_sessions(client, sessions_db_id, sessions_schema),
+    sessions = timed_call(
+        "sessions_list",
+        lambda: cached_read(
+            f"sessions:{sessions_db_id}",
+            lambda: list_sessions(client, sessions_db_id, sessions_schema),
+        ),
     )
     active_sessions = [s for s in sessions if s.get("active")]
     if len(active_sessions) == 1:
@@ -1161,10 +1205,13 @@ def main() -> None:
         st.error("⚠️ Erreur : aucune session trouvée.")
         st.stop()
 
-    players = cached_read(
-        f"players:{players_db_id}:{selected_session['id']}",
-        lambda: list_players(
-            client, players_db_id, players_schema, selected_session["id"]
+    players = timed_call(
+        "players_list_initial",
+        lambda: cached_read(
+            f"players:{players_db_id}:{selected_session['id']}",
+            lambda: list_players(
+                client, players_db_id, players_schema, selected_session["id"]
+            ),
         ),
     )
 
@@ -1175,19 +1222,43 @@ def main() -> None:
         st.error("⚠️ Erreur : identité affranchi•e manquante, reconnecte-toi.")
         st.stop()
 
-    logged_player = cached_read(
-        f"player:{logged_player_page_id}",
-        lambda: get_player_by_page_id(client, players_schema, logged_player_page_id),
+    logged_player = timed_call(
+        "logged_player_lookup",
+        lambda: cached_read(
+            f"player:{logged_player_page_id}",
+            lambda: get_player_by_page_id(
+                client, players_schema, logged_player_page_id
+            ),
+        ),
     )
     if not logged_player:
         st.error("⚠️ Erreur : affranchi•e introuvable dans la base joueurs.")
         st.stop()
 
-    touched, touch_err = touch_player_presence(
-        logged_player_page_id,
-        page="cuisine",
-        session_slug=selected_session.get("code", ""),
+    presence_touch_key = (
+        f"aff_presence_touch_ts:{selected_session['id']}:{logged_player_page_id}"
     )
+    now_ts = time()
+    touch_interval_seconds = 60.0
+    touched, touch_err = True, ""
+    last_touch_ts = float(st.session_state.get(presence_touch_key, 0.0) or 0.0)
+    if now_ts - last_touch_ts >= touch_interval_seconds:
+        touched, touch_err = timed_call(
+            "presence_touch",
+            lambda: touch_player_presence(
+                logged_player_page_id,
+                page="cuisine",
+                session_slug=selected_session.get("code", ""),
+            ),
+        )
+        if touched:
+            st.session_state[presence_touch_key] = now_ts
+    else:
+        LOGGER.info(
+            "presence.touch_skipped_recently player_id=%s age_s=%.1f",
+            logged_player_page_id,
+            now_ts - last_touch_ts,
+        )
     if not touched and touch_err:
         LOGGER.warning(
             "presence.touch_failed player_id=%s error=%s",
@@ -1195,9 +1266,25 @@ def main() -> None:
             touch_err,
         )
 
-    active_12h = count_active_users(
-        window_minutes=12 * 60, session_id=selected_session["id"]
-    )
+    presence_count_key = f"aff_presence_count_12h:{selected_session['id']}"
+    cached_presence = st.session_state.get(presence_count_key, {})
+    cached_count_ts = float(cached_presence.get("ts", 0.0) or 0.0)
+    if now_ts - cached_count_ts >= 30.0:
+        active_12h = timed_call(
+            "presence_count_12h",
+            lambda: count_active_users(
+                window_minutes=12 * 60, session_id=selected_session["id"]
+            ),
+        )
+        st.session_state[presence_count_key] = {"ts": now_ts, "value": active_12h}
+    else:
+        active_12h = int(cached_presence.get("value", 0) or 0)
+        LOGGER.info(
+            "presence.count_cached session_id=%s age_s=%.1f value=%s",
+            selected_session["id"],
+            now_ts - cached_count_ts,
+            active_12h,
+        )
     st.metric(
         "# of affranchi•e•s acti•fs•vs dans les dernières 12 heures",
         value=active_12h,
@@ -1270,10 +1357,13 @@ def main() -> None:
             run_progress_expander(join_steps, _join_runner)
         st.stop()
 
-    players = cached_read(
-        f"players:{players_db_id}:{selected_session['id']}",
-        lambda: list_players(
-            client, players_db_id, players_schema, selected_session["id"]
+    players = timed_call(
+        "players_list_after_join",
+        lambda: cached_read(
+            f"players:{players_db_id}:{selected_session['id']}",
+            lambda: list_players(
+                client, players_db_id, players_schema, selected_session["id"]
+            ),
         ),
     )
     selected_player = (
@@ -1298,16 +1388,19 @@ def main() -> None:
     )
 
     try:
-        questions = cached_read(
-            f"questions:{questions_db_id}:{selected_session['id']}",
-            lambda: ensure_questions_for_session(
-                client,
-                questions_db_id,
-                questions_schema,
-                selected_session["id"],
-                diet_options,
-                allergens_options,
-                hard_no_options,
+        questions = timed_call(
+            "questions_ensure",
+            lambda: cached_read(
+                f"questions:{questions_db_id}:{selected_session['id']}",
+                lambda: ensure_questions_for_session(
+                    client,
+                    questions_db_id,
+                    questions_schema,
+                    selected_session["id"],
+                    diet_options,
+                    allergens_options,
+                    hard_no_options,
+                ),
             ),
         )
     except Exception as exc:
@@ -1368,20 +1461,24 @@ def main() -> None:
             "Regime / preference", options=diet_options, default=values.get("diet", [])
         )
     elif key == "allergens":
-        values["allergens_none_known"] = (
-            st.radio(
-                "Known allergens",
-                options=["Known allergens", "None known"],
-                index=1 if bool(values.get("allergens_none_known", False)) else 0,
-                horizontal=True,
-            )
-            == "None known"
+        mode_options = ["Choose one", "Known allergens", "None known"]
+        mode_value = values.get("allergens_mode", "")
+        mode_index = mode_options.index(mode_value) if mode_value in mode_options else 0
+        selected_mode = st.radio(
+            "Allergènes (required)",
+            options=mode_options,
+            index=mode_index,
+            horizontal=True,
         )
+        values["allergens_mode"] = (
+            selected_mode if selected_mode != "Choose one" else ""
+        )
+        values["allergens_none_known"] = values["allergens_mode"] == "None known"
         if values["allergens_none_known"]:
             values["allergens"] = []
             values["allergen_other"] = ""
             st.caption("No known allergens selected.")
-        else:
+        elif values["allergens_mode"] == "Known allergens":
             values["allergens"] = st.multiselect(
                 "Allergens",
                 options=allergens_options,
@@ -1395,6 +1492,10 @@ def main() -> None:
                 )
             )
             st.caption("Use commas to add multiple custom allergens.")
+        else:
+            values["allergens"] = []
+            values["allergen_other"] = ""
+            st.info("Please choose either 'Known allergens' or 'None known'.")
     elif key == "hard_no":
         values["hard_no_none"] = (
             st.radio(
@@ -1471,66 +1572,95 @@ def main() -> None:
         )
         if len(values["cravings"]) > 2:
             st.warning("⚠️ Maximum 2 envies pour faciliter la synthèse cuisine.")
-    st.markdown("### Contribution (EUR)")
-    st.caption("Choose a suggested amount or enter another admissible amount.")
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stButton"] button[kind="secondary"] { font-size: 2.5rem; font-weight: 900; padding-top: 1rem; padding-bottom: 1rem; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    preset_amounts = [0, 1, 10, 15, 20, 30]
-    amount_emoji = {0: "🪙", 1: "☎️", 10: "📞", 15: "📟", 20: "🔔", 30: "🥇"}
-    selected_choice = str(values.get("contribution_choice", "0"))
-    st.markdown("**Preset amounts (EUR)**")
-    _, center_col, _ = st.columns([1.7, 1.6, 1.7])
-    with center_col:
-        for row in [preset_amounts[:3], preset_amounts[3:]]:
-            cols = st.columns(3)
-            for idx, amount in enumerate(row):
-                is_selected = selected_choice == str(amount)
-                prefix = "✅ " if is_selected else ""
-                label = f"{prefix}{amount_emoji.get(amount, '☎️')} {amount}"
-                if cols[idx].button(
-                    label,
-                    key=f"eco-amount-{amount}",
-                    use_container_width=True,
-                    type="secondary",
-                ):
-                    selected_choice = str(amount)
-                    values["contribution_choice"] = selected_choice
-                    values["contribution_value"] = float(amount)
-                    values["contribution_custom"] = ""
-
-    use_other = st.radio(
-        "Or choose custom amount (EUR)",
-        options=["Use preset", "Other amount"],
-        index=1 if selected_choice == "Other amount" else 0,
-        horizontal=True,
-    )
-    if use_other == "Other amount":
-        values["contribution_choice"] = "Other amount"
-        custom_raw = st.text_input(
-            "Other amount in EUR",
-            value=str(values.get("contribution_custom", "")),
-            help="Enter a number between 1 and 100000, or 0.",
+    elif key == "contribution":
+        st.caption("Choose a suggested amount or enter another admissible amount.")
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stButton"] button[kind="secondary"] { font-size: 2.5rem; font-weight: 900; padding-top: 1rem; padding-bottom: 1rem; }
+            </style>
+            """,
+            unsafe_allow_html=True,
         )
-        values["contribution_custom"] = custom_raw
-        try:
-            values["contribution_value"] = float(custom_raw)
-        except Exception:
-            values["contribution_value"] = -1.0
-    else:
-        values["contribution_choice"] = selected_choice
-        if selected_choice not in {"0", "1", "10", "15", "20", "30"}:
-            selected_choice = "0"
-            values["contribution_choice"] = selected_choice
-        values["contribution_value"] = float(selected_choice)
+        preset_amounts = [0, 1, 10, 15, 20, 30]
+        amount_emoji = {0: "🪙", 1: "☎️", 10: "📞", 15: "📟", 20: "🔔", 30: "🥇"}
+        selected_choice = str(values.get("contribution_choice", ""))
+        contrib_mode_options = ["Choose one", "Use preset", "Other amount"]
+        mode_key = "q-contribution-mode"
+        if mode_key not in st.session_state:
+            st.session_state[mode_key] = (
+                "Other amount"
+                if selected_choice == "Other amount"
+                else (
+                    "Use preset"
+                    if selected_choice in {"0", "1", "10", "15", "20", "30"}
+                    else "Choose one"
+                )
+            )
+        st.markdown("**Preset amounts (EUR)**")
+        _, center_col, _ = st.columns([1.7, 1.6, 1.7])
+        with center_col:
+            for row in [preset_amounts[:3], preset_amounts[3:]]:
+                cols = st.columns(3)
+                for idx, amount in enumerate(row):
+                    is_selected = selected_choice == str(amount)
+                    prefix = "✅ " if is_selected else ""
+                    label = f"{prefix}{amount_emoji.get(amount, '☎️')} {amount}"
+                    if cols[idx].button(
+                        label,
+                        key=f"eco-amount-{amount}",
+                        use_container_width=True,
+                        type="primary" if is_selected else "secondary",
+                    ):
+                        selected_choice = str(amount)
+                        values["contribution_choice"] = selected_choice
+                        values["contribution_value"] = float(amount)
+                        values["contribution_custom"] = ""
+                        st.session_state[mode_key] = "Use preset"
+                        st.rerun()
 
-    if not _is_valid_contribution(values.get("contribution_value")):
-        st.error("Invalid contribution amount. Use 0 or a value in [1, 100000] EUR.")
+        current_mode = st.session_state.get(mode_key, "Choose one")
+        if current_mode not in contrib_mode_options:
+            current_mode = "Choose one"
+        contribution_mode = st.radio(
+            "Or choose custom amount (EUR)",
+            options=contrib_mode_options,
+            index=contrib_mode_options.index(current_mode),
+            horizontal=True,
+            key=mode_key,
+        )
+        if contribution_mode == "Other amount":
+            values["contribution_choice"] = "Other amount"
+            custom_raw = st.text_input(
+                "Other amount in EUR",
+                value=str(values.get("contribution_custom", "")),
+                help="Enter a number between 1 and 100000, or 0.",
+            )
+            values["contribution_custom"] = custom_raw
+            try:
+                values["contribution_value"] = float(custom_raw)
+            except Exception:
+                values["contribution_value"] = None
+        elif contribution_mode == "Use preset":
+            values["contribution_choice"] = selected_choice
+            if selected_choice not in {"0", "1", "10", "15", "20", "30"}:
+                values["contribution_choice"] = ""
+                values["contribution_value"] = None
+                st.info("Select one preset amount.")
+            else:
+                values["contribution_value"] = float(selected_choice)
+        else:
+            values["contribution_choice"] = ""
+            values["contribution_custom"] = ""
+            values["contribution_value"] = None
+            st.info("Please choose a contribution mode.")
+
+        if contribution_mode != "Choose one" and not _is_valid_contribution(
+            values.get("contribution_value")
+        ):
+            st.error(
+                "Invalid contribution amount. Use 0 or a value in [1, 100000] EUR."
+            )
 
     st.session_state["aff_form_values"] = values
     is_required_current = bool(current.get("required"))
@@ -1547,13 +1677,17 @@ def main() -> None:
         if q["key"] == "diet":
             missing_items.append("Regime / preference: pick at least one option.")
         elif q["key"] == "allergens":
-            missing_items.append("Allergènes: pick one allergen or choose 'None known'.")
+            missing_items.append(
+                "Allergènes: pick one allergen or choose 'None known'."
+            )
         elif q["key"] == "hard_no":
             missing_items.append(
                 "Ingrédients non: pick one exclusion or choose 'No ingredient restrictions'."
             )
         elif q["key"] == "spice":
-            missing_items.append("Piquant & Condiments: set your spice level and condiments.")
+            missing_items.append(
+                "Piquant & Condiments: set your spice level and condiments."
+            )
         elif q["key"] == "texture":
             missing_items.append("Texture: choose one texture option.")
         elif q["key"] == "cravings":
@@ -1603,6 +1737,7 @@ def main() -> None:
         if (
             last_save.get("player_id") == selected_player["id"]
             and last_save.get("session_id") == selected_session["id"]
+            and bool(st.session_state.get("aff_show_save_success_once", False))
         ):
             st.success("Everything has been saved.")
             if st.session_state.pop("aff_show_balloons", False):
@@ -1611,11 +1746,14 @@ def main() -> None:
                 f"<p style='font-size:1.45rem; line-height:1.5; font-weight:600; margin: 0.25rem 0 0.75rem 0;'>{short_save_summary(last_save.get('summary', {}))}</p>",
                 unsafe_allow_html=True,
             )
+            st.session_state["aff_show_save_success_once"] = False
 
     if submit_now:
         if missing_items:
             st.error("⚠️ Some required inputs are still missing.")
-            st.caption("Please complete the items listed above, then click Enregistrer.")
+            st.caption(
+                "Please complete the items listed above, then click Enregistrer."
+            )
             st.stop()
 
         save_steps = [
@@ -1645,7 +1783,6 @@ def main() -> None:
                     selected_player["id"],
                 )
                 required_qids = list(active_keys)
-                required_qids.append("contribution")
                 missing_qids = [k for k in required_qids if not qid_by_key.get(k)]
                 if missing_qids:
                     push(
@@ -1744,42 +1881,46 @@ def main() -> None:
                     _bust_cache()
 
                 push("🗳️ Sauvegarde · Réponses")
-                upsert_response(
-                    client,
-                    responses_db_id,
-                    responses_schema,
-                    session_id=selected_session["id"],
-                    player_id=selected_player["id"],
-                    question_id=qid_map["diet"],
-                    value=list(values.get("diet") or []),
-                )
-                upsert_response(
-                    client,
-                    responses_db_id,
-                    responses_schema,
-                    session_id=selected_session["id"],
-                    player_id=selected_player["id"],
-                    question_id=qid_map["allergens"],
-                    value=allergens_merged,
-                )
-                upsert_response(
-                    client,
-                    responses_db_id,
-                    responses_schema,
-                    session_id=selected_session["id"],
-                    player_id=selected_player["id"],
-                    question_id=qid_map["hard_no"],
-                    value=hard_no_merged,
-                )
-                upsert_response(
-                    client,
-                    responses_db_id,
-                    responses_schema,
-                    session_id=selected_session["id"],
-                    player_id=selected_player["id"],
-                    question_id=qid_map["spice"],
-                    value=int(values.get("spice", 3)),
-                )
+                if "diet" in active_keys and qid_map.get("diet"):
+                    upsert_response(
+                        client,
+                        responses_db_id,
+                        responses_schema,
+                        session_id=selected_session["id"],
+                        player_id=selected_player["id"],
+                        question_id=qid_map["diet"],
+                        value=list(values.get("diet") or []),
+                    )
+                if "allergens" in active_keys and qid_map.get("allergens"):
+                    upsert_response(
+                        client,
+                        responses_db_id,
+                        responses_schema,
+                        session_id=selected_session["id"],
+                        player_id=selected_player["id"],
+                        question_id=qid_map["allergens"],
+                        value=allergens_merged,
+                    )
+                if "hard_no" in active_keys and qid_map.get("hard_no"):
+                    upsert_response(
+                        client,
+                        responses_db_id,
+                        responses_schema,
+                        session_id=selected_session["id"],
+                        player_id=selected_player["id"],
+                        question_id=qid_map["hard_no"],
+                        value=hard_no_merged,
+                    )
+                if "spice" in active_keys and qid_map.get("spice"):
+                    upsert_response(
+                        client,
+                        responses_db_id,
+                        responses_schema,
+                        session_id=selected_session["id"],
+                        player_id=selected_player["id"],
+                        question_id=qid_map["spice"],
+                        value=int(values.get("spice", 3)),
+                    )
                 if "texture" in active_keys and qid_map.get("texture"):
                     upsert_response(
                         client,
@@ -1802,6 +1943,11 @@ def main() -> None:
                             normalize_label(v) for v in (values.get("cravings") or [])
                         ],
                     )
+                contribution_value = values.get("contribution_value")
+                if not _is_valid_contribution(contribution_value):
+                    raise RuntimeError(
+                        "Contribution is required and must be admissible."
+                    )
                 if qid_map.get("contribution"):
                     push(
                         "🗳️ Sauvegarde · Contribution",
@@ -1813,7 +1959,7 @@ def main() -> None:
                         session_id=selected_session["id"],
                         player_id=selected_player["id"],
                         question_id=qid_map["contribution"],
-                        value=float(values.get("contribution_value", 0.0)),
+                        value=float(contribution_value),
                     )
                 else:
                     push(
@@ -1839,7 +1985,7 @@ def main() -> None:
                     ]
                     if "cravings" in active_keys
                     else [],
-                    "contribution": float(values.get("contribution_value", 0.0)),
+                    "contribution": float(contribution_value),
                 }
                 touched_after_save, touch_err_after_save = touch_player_presence(
                     selected_player["id"],
@@ -1857,6 +2003,7 @@ def main() -> None:
                     "player_id": selected_player["id"],
                     "summary": summary,
                 }
+                st.session_state["aff_show_save_success_once"] = True
                 LOGGER.info(
                     "save.success session_id=%s player_id=%s summary=%s",
                     selected_session["id"],
@@ -1876,6 +2023,8 @@ def main() -> None:
                 LOGGER.exception("save.error")
 
         run_progress_expander(save_steps, _save_runner)
+
+    LOGGER.info("perf.page_total_ms=%.1f", (perf_counter() - page_started) * 1000)
 
     if is_host:
         st.markdown("---")
