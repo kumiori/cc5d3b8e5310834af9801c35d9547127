@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import traceback
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -65,7 +67,7 @@ QUESTION_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "key": "cravings",
-        "prompt": "Envies (ressentis)",
+        "prompt": "Envies du moment",
         "kind": "craving",
         "qtype": "multi",
         "required": True,
@@ -81,12 +83,20 @@ QUESTION_CATALOG: List[Dict[str, Any]] = [
         "order": 7,
     },
     {
+        "key": "contribution",
+        "prompt": "Economic contribution",
+        "kind": "preference",
+        "qtype": "single",
+        "required": True,
+        "order": 8,
+    },
+    {
         "key": "tonight_note",
         "prompt": "Un souhait pour ce soir",
         "kind": "notes",
         "qtype": "text",
         "required": False,
-        "order": 8,
+        "order": 9,
     },
 ]
 
@@ -100,11 +110,22 @@ CRAVINGS_OPTIONS = [
     "croquant",
     "crémeux",
     "chaleur épicée",
-    "surprise joueuse",
+    "surprise",
 ]
 
-TEXTURE_OPTIONS = ["croquant", "crémeux", "mixte"]
-CONDIMENT_CHOICES = ["j'aime", "ok", "j'évite"]
+TEXTURE_OPTIONS = ["croquant", "crémeux", "les deux", "autre/aucune"]
+CONDIMENT_CHOICES = ["j'évite", "ok", "j'aime"]
+
+
+LOGGER = logging.getLogger("affranchis.cuisine")
+if not LOGGER.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+    )
+    LOGGER.addHandler(_handler)
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.propagate = False
 
 
 # ---------- helpers ----------
@@ -136,24 +157,128 @@ def cached_read(cache_key: str, loader):
 
 
 def run_progress_expander(steps: List[Dict[str, str]], runner):
-    logs: List[str] = []
     placeholder = st.empty()
+    logs: List[str] = []
 
-    def push(title: str, msg: str) -> None:
-        logs.append(msg)
+    def push(title: str, _msg: str = "") -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {title}"
+        if _msg:
+            line += f" · {_msg}"
+        LOGGER.info("progress %s", line)
+        logs.append(line)
         with placeholder.container():
-            with st.expander(title, expanded=True):
-                for line in logs:
-                    st.markdown(line)
+            with st.expander("Save debug trace (live)", expanded=True):
+                for item in logs[-20:]:
+                    st.markdown(f"- {item}")
 
-    for step in steps:
-        push(step["title"], f"- {step['msg']}")
+    if steps:
+        push(steps[0]["title"], steps[0].get("msg", ""))
     return runner(push)
 
 
 def normalize_label(value: str) -> str:
     txt = re.sub(r"\s+", " ", (value or "").strip().lower())
     return txt
+
+
+def parse_csv_labels(raw: str) -> List[str]:
+    tokens = [normalize_label(tok) for tok in str(raw or "").split(",")]
+    deduped: List[str] = []
+    for tok in tokens:
+        if tok and tok not in deduped:
+            deduped.append(tok)
+    return deduped
+
+
+def _is_valid_contribution(value: Any) -> bool:
+    try:
+        amount = float(value)
+    except Exception:
+        return False
+    if amount == 0:
+        return True
+    return 1 <= amount <= 100000
+
+
+def short_save_summary(summary: Dict[str, Any]) -> str:
+    preferences = ", ".join(summary.get("diet") or []) or "—"
+    allergens = ", ".join(summary.get("allergens") or []) or "none"
+    hard_no = ", ".join(summary.get("hard_no") or []) or "none"
+    contrib = summary.get("economic_contribution", 0)
+    cravings = ", ".join(summary.get("cravings") or []) or "—"
+    return (
+        f"My preferences: {preferences} · Allergens: {allergens} · No ingredients: {hard_no} · "
+        f"Contribution: {contrib} · Cravings: {cravings}"
+    )
+
+
+def ensure_questionnaire_state(
+    session_id: str,
+    player_id: str,
+    selected_player: Dict[str, Any],
+) -> str:
+    state_key = f"{session_id}:{player_id}"
+    current_key = str(st.session_state.get("aff_form_state_key", ""))
+    if current_key != state_key:
+        st.session_state["aff_form_state_key"] = state_key
+        st.session_state["aff_form_index"] = 0
+        st.session_state["aff_form_values"] = {
+            "diet": list(selected_player.get("diet", [])),
+            "allergens": list(selected_player.get("allergens", [])),
+            "hard_no": list(selected_player.get("hard_no", [])),
+            "allergen_other": "",
+            "allergens_none_known": False,
+            "hard_no_other": "",
+            "hard_no_none": False,
+            "spice": 3,
+            "texture": "",
+            "pref_ail": "ok",
+            "pref_oignon": "ok",
+            "pref_coriandre": "ok",
+            "cravings": [],
+            "surprise": False,
+            "contribution_choice": "0",
+            "contribution_custom": "",
+            "contribution_value": 0.0,
+            "bio_note": selected_player.get("bio_note", ""),
+            "tonight_note": "",
+        }
+    return state_key
+
+
+def _required_answered(question_key: str, values: Dict[str, Any]) -> bool:
+    if question_key == "diet":
+        return (
+            isinstance(values.get(question_key), list)
+            and len(values.get(question_key) or []) > 0
+        )
+    if question_key == "hard_no":
+        if bool(values.get("hard_no_none", False)):
+            return True
+        custom = normalize_label(values.get("hard_no_other", ""))
+        return (
+            isinstance(values.get("hard_no"), list)
+            and len(values.get("hard_no") or []) > 0
+        ) or bool(custom)
+    if question_key == "allergens":
+        if bool(values.get("allergens_none_known", False)):
+            return True
+        custom = parse_csv_labels(values.get("allergen_other", ""))
+        return (
+            isinstance(values.get("allergens"), list)
+            and len(values.get("allergens") or []) > 0
+        ) or bool(custom)
+    if question_key == "spice":
+        return values.get("spice") is not None
+    if question_key == "texture":
+        return str(values.get("texture", "")).strip() != ""
+    if question_key == "cravings":
+        vals = values.get("cravings") or []
+        return isinstance(vals, list) and len(vals) > 0
+    if question_key == "contribution":
+        return _is_valid_contribution(values.get("contribution_value"))
+    return True
 
 
 def now_iso() -> str:
@@ -973,12 +1098,12 @@ def render_host_view(
 
 def main() -> None:
     st.set_page_config(
-        page_title="Les Affranchis · Cuisine", page_icon="🍲", layout="wide"
+        page_title="Les Affranchis · Cuisine",
+        page_icon="🍲",
+        # layout="wide"
+        initial_sidebar_state="collapsed",
     )
     st.title("Les Affranchis · Cuisine")
-
-    debug("🔄 App mise à jour !")
-    debug("🔐 Vérification de la connexion…")
 
     ensure_session_state()
     repo = get_notion_repo()
@@ -1044,9 +1169,7 @@ def main() -> None:
     active_sessions = [s for s in sessions if s.get("active")]
     if len(active_sessions) == 1:
         selected_session = active_sessions[0]
-        debug(f"🗂️ Session active : {selected_session['code']}")
     elif sessions:
-        debug("🗂️ Plusieurs sessions disponibles, sélection manuelle requise.")
         labels = [
             f"{s['code']} {'(active)' if s.get('active') else ''}" for s in sessions
         ]
@@ -1064,12 +1187,11 @@ def main() -> None:
         ),
     )
 
-    debug("🟢 Session prête")
     st.caption("Tu peux répondre en 2 minutes. Tes contraintes passent avant tout.")
 
     logged_player_page_id = str(st.session_state.get("player_page_id", "")).strip()
     if not logged_player_page_id:
-        st.error("⚠️ Erreur : identité participant manquante, reconnecte-toi.")
+        st.error("⚠️ Erreur : identité affranchi•e manquante, reconnecte-toi.")
         st.stop()
 
     logged_player = cached_read(
@@ -1077,12 +1199,12 @@ def main() -> None:
         lambda: get_player_by_page_id(client, players_schema, logged_player_page_id),
     )
     if not logged_player:
-        st.error("⚠️ Erreur : participant introuvable dans la base joueurs.")
+        st.error("⚠️ Erreur : affranchi•e introuvable dans la base joueurs.")
         st.stop()
 
     st.markdown("## 0) Participation")
     participate = st.radio(
-        f"Vas-tu participer à la session « {selected_session['code']} » ?",
+        f"Je vais participer à la session « {selected_session['code']} » ?",
         options=["Oui", "Non"],
         horizontal=True,
     )
@@ -1160,7 +1282,7 @@ def main() -> None:
         or logged_player
     )
 
-    st.caption(f"Participant actif : **{selected_player['name']}**")
+    st.caption(f"Affranchi·e actif·ve : **{selected_player['name']}**")
 
     diet_options = extract_multi_options(
         players_schema,
@@ -1176,91 +1298,315 @@ def main() -> None:
         players_schema, "hard_no", ["ail", "oignon", "coriandre", "très épicé"]
     )
 
-    with st.status(
-        "🧱 Préparation du catalogue de questions…", expanded=False
-    ) as seed_status:
-        try:
-            questions = cached_read(
-                f"questions:{questions_db_id}:{selected_session['id']}",
-                lambda: ensure_questions_for_session(
-                    client,
-                    questions_db_id,
-                    questions_schema,
-                    selected_session["id"],
-                    diet_options,
-                    allergens_options,
-                    hard_no_options,
-                ),
-            )
-            seed_status.update(label="✅ Questions prêtes", state="complete")
-        except Exception as exc:
-            seed_status.update(
-                label="⚠️ Erreur de préparation des questions", state="error"
-            )
-            st.error(f"🔍 Détail : {exc}")
-            st.stop()
+    try:
+        questions = cached_read(
+            f"questions:{questions_db_id}:{selected_session['id']}",
+            lambda: ensure_questions_for_session(
+                client,
+                questions_db_id,
+                questions_schema,
+                selected_session["id"],
+                diet_options,
+                allergens_options,
+                hard_no_options,
+            ),
+        )
+    except Exception as exc:
+        st.error("⚠️ Erreur : impossible de préparer le questionnaire.")
+        st.error(f"🔍 Détail : {exc}")
+        st.stop()
 
     qid_by_key = {q["key"]: q["id"] for q in questions}
 
     is_host = selected_player.get("role") == "host"
+    ensure_questionnaire_state(
+        selected_session["id"],
+        selected_player["id"],
+        selected_player,
+    )
+    values: Dict[str, Any] = st.session_state["aff_form_values"]
+    question_index = int(st.session_state.get("aff_form_index", 0))
+    total_questions = len(QUESTION_CATALOG)
+    question_index = max(0, min(question_index, total_questions - 1))
+    st.session_state["aff_form_index"] = question_index
+    current = QUESTION_CATALOG[question_index]
+    key = current["key"]
 
-    st.markdown("## 1) Contraintes")
-    diet = st.multiselect(
-        "Régime", options=diet_options, default=selected_player.get("diet", [])
+    required_count = len([q for q in QUESTION_CATALOG if q.get("required")])
+    answered_required = len(
+        [
+            q
+            for q in QUESTION_CATALOG
+            if q.get("required") and _required_answered(q["key"], values)
+        ]
     )
-    allergens = st.multiselect(
-        "Allergènes",
-        options=allergens_options,
-        default=selected_player.get("allergens", []),
+    st.progress(answered_required / required_count if required_count else 0.0)
+    st.caption(
+        f"Progression: étape {question_index + 1}/{total_questions} · requis {answered_required}/{required_count}"
     )
-    hard_no = st.multiselect(
-        'Ingrédients "non"',
-        options=hard_no_options,
-        default=selected_player.get("hard_no", []),
-    )
-    hard_no_other = normalize_label(st.text_input("Autre ingrédient non (optionnel)"))
 
-    st.markdown("## 2) Préférences")
-    spice = st.slider("Tolérance au piquant", min_value=0, max_value=5, value=3, step=1)
-    st.caption("0 pas du tout · 3 ok · 5 à fond")
-    texture = st.radio("Texture", options=TEXTURE_OPTIONS, horizontal=True)
-    st.markdown("Condiments (optionnel)")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        pref_ail = st.select_slider("Ail", options=CONDIMENT_CHOICES, value="ok")
-    with c2:
-        pref_oignon = st.select_slider("Oignon", options=CONDIMENT_CHOICES, value="ok")
-    with c3:
-        pref_coriandre = st.select_slider(
-            "Coriandre", options=CONDIMENT_CHOICES, value="ok"
+    title_prompt = current["prompt"]
+    if key == "diet":
+        title_prompt = "Regime / preference"
+    st.markdown(f"## {question_index + 1}) {title_prompt}")
+    if key == "diet":
+        values["diet"] = st.multiselect(
+            "Regime / preference", options=diet_options, default=values.get("diet", [])
+        )
+    elif key == "allergens":
+        values["allergens_none_known"] = (
+            st.radio(
+                "Known allergens",
+                options=["Known allergens", "None known"],
+                index=1 if bool(values.get("allergens_none_known", False)) else 0,
+                horizontal=True,
+            )
+            == "None known"
+        )
+        if values["allergens_none_known"]:
+            values["allergens"] = []
+            values["allergen_other"] = ""
+            st.caption("No known allergens selected.")
+        else:
+            values["allergens"] = st.multiselect(
+                "Allergens",
+                options=allergens_options,
+                default=values.get("allergens", []),
+            )
+            values["allergen_other"] = normalize_label(
+                st.text_input(
+                    "Other allergens (optional, comma-separated)",
+                    value=values.get("allergen_other", ""),
+                    help="Example: sesame, buckwheat, kiwi",
+                )
+            )
+            st.caption("Use commas to add multiple custom allergens.")
+    elif key == "hard_no":
+        values["hard_no_none"] = (
+            st.radio(
+                "Ingredient exclusions",
+                options=["I have exclusions", "No ingredient restrictions"],
+                index=1 if bool(values.get("hard_no_none", False)) else 0,
+                horizontal=True,
+            )
+            == "No ingredient restrictions"
+        )
+        if values["hard_no_none"]:
+            values["hard_no"] = []
+            values["hard_no_other"] = ""
+            st.caption("No ingredient restrictions selected.")
+        else:
+            values["hard_no"] = st.multiselect(
+                'Ingrédients "non"',
+                options=hard_no_options,
+                default=values.get("hard_no", []),
+            )
+            values["hard_no_other"] = normalize_label(
+                st.text_input(
+                    "Autre ingrédient non (optionnel)",
+                    value=values.get("hard_no_other", ""),
+                )
+            )
+    elif key == "spice":
+        values["spice"] = st.slider(
+            "Plaisir du piquant",
+            min_value=0,
+            max_value=5,
+            value=int(values.get("spice", 3)),
+            step=1,
+        )
+        st.caption("0 pas du tout · 3 ok · 5 à fond")
+        st.caption("Condiments (j'évite = gauche, j'aime = droite)")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            values["pref_ail"] = st.select_slider(
+                "Ail",
+                options=CONDIMENT_CHOICES,
+                value=str(values.get("pref_ail", "ok")),
+            )
+        with c2:
+            values["pref_oignon"] = st.select_slider(
+                "Oignon",
+                options=CONDIMENT_CHOICES,
+                value=str(values.get("pref_oignon", "ok")),
+            )
+        with c3:
+            values["pref_coriandre"] = st.select_slider(
+                "Coriandre",
+                options=CONDIMENT_CHOICES,
+                value=str(values.get("pref_coriandre", "ok")),
+            )
+    elif key == "texture":
+        values["texture"] = st.radio(
+            "Texture",
+            options=TEXTURE_OPTIONS,
+            horizontal=True,
+            index=TEXTURE_OPTIONS.index(values["texture"])
+            if values.get("texture") in TEXTURE_OPTIONS
+            else 0,
+        )
+    elif key == "cravings":
+        values["cravings"] = (
+            st.pills(
+                "Choisis jusqu'à 2 envies",
+                options=CRAVINGS_OPTIONS,
+                selection_mode="multi",
+                default=values.get("cravings", []),
+            )
+            or []
+        )
+        if len(values["cravings"]) > 2:
+            st.warning("⚠️ Maximum 2 envies pour faciliter la synthèse cuisine.")
+    elif key == "surprise":
+        values["surprise"] = st.toggle(
+            "Surprise", value=bool(values.get("surprise", False))
+        )
+    elif key == "contribution":
+        st.caption("Choose a suggested amount or enter another admissible amount.")
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stButton"] button[kind="secondary"] { font-size: 1.35rem; font-weight: 700; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+        preset_amounts = [0, 1, 10, 15, 20, 30]
+        selected_choice = str(values.get("contribution_choice", "0"))
+        st.markdown("**Preset amounts**")
+        _, center_col, _ = st.columns([1, 3, 1])
+        with center_col:
+            for row in [preset_amounts[:3], preset_amounts[3:]]:
+                cols = st.columns(3)
+                for idx, amount in enumerate(row):
+                    is_selected = selected_choice == str(amount)
+                    label = f"✅ {amount}" if is_selected else str(amount)
+                    if cols[idx].button(
+                        label,
+                        key=f"eco-amount-{amount}",
+                        use_container_width=True,
+                        type="secondary",
+                    ):
+                        selected_choice = str(amount)
+                        values["contribution_choice"] = selected_choice
+                        values["contribution_value"] = float(amount)
+                        values["contribution_custom"] = ""
+
+        use_other = st.radio(
+            "Or choose custom amount",
+            options=["Use preset", "Other amount"],
+            index=1 if selected_choice == "Other amount" else 0,
+            horizontal=True,
+        )
+        if use_other == "Other amount":
+            values["contribution_choice"] = "Other amount"
+            custom_raw = st.text_input(
+                "Other amount",
+                value=str(values.get("contribution_custom", "")),
+                help="Enter a number between 1 and 100000, or 0.",
+            )
+            values["contribution_custom"] = custom_raw
+            try:
+                values["contribution_value"] = float(custom_raw)
+            except Exception:
+                values["contribution_value"] = -1.0
+        else:
+            values["contribution_choice"] = selected_choice
+            if selected_choice not in {"0", "1", "10", "15", "20", "30"}:
+                selected_choice = "0"
+                values["contribution_choice"] = selected_choice
+            values["contribution_value"] = float(selected_choice)
+
+        st.caption(
+            "Technical note: for technical reasons the admissible set is not compact. "
+            "Maximum amount 100K, the interval between 0 and 1 (extremes excluded) is forbidden. "
+            "Admissible set is {0} U [m, M], with m=1, M=100K."
+        )
+        if not _is_valid_contribution(values.get("contribution_value")):
+            st.error("Invalid contribution amount. Use 0 or a value in [1, 100000].")
+    elif key == "tonight_note":
+        values["bio_note"] = st.text_area(
+            "Une phrase / toi (public, persistant)",
+            value=str(values.get("bio_note", "")),
+        )
+        values["tonight_note"] = st.text_area(
+            "Un souhait pour ce soir (public, session)",
+            value=str(values.get("tonight_note", "")),
         )
 
-    st.markdown("## 3) Envies (ressentis)")
-    cravings = st.pills(
-        "Choisis jusqu'à 2 envies",
-        options=CRAVINGS_OPTIONS,
-        selection_mode="multi",
-        # max_selections=2,
-        default=[],
-    )
-    surprise = st.toggle("Surprise")
-    if len(cravings or []) > 2:
-        st.warning("⚠️ Maximum 2 envies pour faciliter la synthèse cuisine.")
+    st.session_state["aff_form_values"] = values
+    is_required_current = bool(current.get("required"))
+    can_next = (not is_required_current) or _required_answered(key, values)
 
-    st.markdown("## 4) Notes")
-    bio_note = st.text_area(
-        "Une phrase sur toi (public, persistant)",
-        value=selected_player.get("bio_note", ""),
-    )
-    tonight_note = st.text_area("Un souhait pour ce soir (public, session)", value="")
+    submit_now = False
+    col_back, col_next, col_submit = st.columns(3)
+    with col_back:
+        if st.button("Retour", use_container_width=True, disabled=question_index == 0):
+            st.session_state["aff_form_index"] = max(0, question_index - 1)
+            st.rerun()
+    with col_next:
+        if st.button(
+            "Suivant",
+            use_container_width=True,
+            disabled=question_index >= total_questions - 1 or not can_next,
+        ):
+            st.session_state["aff_form_index"] = min(
+                total_questions - 1, question_index + 1
+            )
+            st.rerun()
+    with col_submit:
+        submit_disabled = question_index != total_questions - 1
+        submit_now = st.button(
+            "Enregistrer",
+            type="primary",
+            use_container_width=True,
+            disabled=submit_disabled,
+        )
 
-    if st.button("Enregistrer", type="primary", use_container_width=True):
-        if not texture:
-            st.error("⚠️ La texture est requise.")
+    last_save = st.session_state.get("aff_last_save_summary")
+    if isinstance(last_save, dict):
+        if (
+            last_save.get("player_id") == selected_player["id"]
+            and last_save.get("session_id") == selected_session["id"]
+        ):
+            st.success("Everything has been saved.")
+            st.markdown(
+                f"<p style='font-size:1.45rem; line-height:1.5; font-weight:600; margin: 0.25rem 0 0.75rem 0;'>{short_save_summary(last_save.get('summary', {}))}</p>",
+                unsafe_allow_html=True,
+            )
+
+    if submit_now:
+        missing_labels: List[str] = []
+        for q in QUESTION_CATALOG:
+            if not q.get("required"):
+                continue
+            if _required_answered(q["key"], values):
+                continue
+            label = q["prompt"]
+            if q["key"] == "diet":
+                label = "Regime / preference"
+            elif q["key"] == "allergens":
+                label = "Allergens (or select 'None known')"
+            elif q["key"] == "hard_no":
+                label = "Ingredient exclusions (or select 'No ingredient restrictions')"
+            elif q["key"] == "economic_contribution":
+                label = "Economic contribution"
+            missing_labels.append(label)
+        if missing_labels:
+            st.error("⚠️ Some required questions are still incomplete.")
+            st.markdown("Please complete the following before saving:")
+            for item in missing_labels:
+                st.markdown(f"- {item}")
+            st.caption(
+                "Tip: use Retour/Suivant to navigate to each missing question, then click Enregistrer again."
+            )
             st.stop()
 
         save_steps = [
-            {"title": "🔄 Sauvegarde · Démarrage", "msg": "Préparation des réponses."},
+            {
+                "title": "🔄 Sauvegarde · Démarrage",
+                "msg": "Préparation des réponses.",
+            },
             {
                 "title": "🧍 Sauvegarde · Profil",
                 "msg": "Mise à jour des champs persistants du participant.",
@@ -1277,46 +1623,128 @@ def main() -> None:
 
         def _save_runner(push):
             try:
-                push(
-                    "🧍 Sauvegarde · Profil", "- Écriture des contraintes persistantes…"
+                LOGGER.info(
+                    "save.start session_id=%s player_id=%s",
+                    selected_session["id"],
+                    selected_player["id"],
                 )
+                required_qids = [
+                    "diet",
+                    "allergens",
+                    "hard_no",
+                    "spice",
+                    "texture",
+                    "cravings",
+                    "surprise",
+                    "contribution",
+                    "tonight_note",
+                ]
+                missing_qids = [k for k in required_qids if not qid_by_key.get(k)]
+                if missing_qids:
+                    push(
+                        "🔧 Sauvegarde · Réparation",
+                        "Question IDs manquants, ré-initialisation des questions.",
+                    )
+                    LOGGER.warning(
+                        "save.missing_qids initial_missing=%s", ",".join(missing_qids)
+                    )
+                    _bust_cache()
+                    refreshed_questions = ensure_questions_for_session(
+                        client,
+                        questions_db_id,
+                        questions_schema,
+                        selected_session["id"],
+                        diet_options,
+                        allergens_options,
+                        hard_no_options,
+                    )
+                    refreshed_qid_by_key = {
+                        q["key"]: q["id"] for q in refreshed_questions
+                    }
+                    missing_after_refresh = [
+                        k for k in required_qids if not refreshed_qid_by_key.get(k)
+                    ]
+                    if missing_after_refresh:
+                        push(
+                            "⚠️ Sauvegarde · Réparation incomplète",
+                            "Certaines questions restent absentes ; sauvegarde partielle.",
+                        )
+                        LOGGER.error(
+                            "save.missing_qids after_refresh=%s",
+                            ",".join(missing_after_refresh),
+                        )
+                    qid_map = refreshed_qid_by_key
+                else:
+                    qid_map = dict(qid_by_key)
+                push("🧍 Sauvegarde · Profil", "Updating persistent player profile.")
                 hard_no_merged = list(
                     dict.fromkeys(
-                        [*hard_no, *([hard_no_other] if hard_no_other else [])]
+                        [
+                            *(values.get("hard_no") or []),
+                            *(
+                                [values.get("hard_no_other")]
+                                if values.get("hard_no_other")
+                                else []
+                            ),
+                        ]
                     )
                 )
+                allergen_custom_values = (
+                    parse_csv_labels(values.get("allergen_other", ""))
+                    if not bool(values.get("allergens_none_known", False))
+                    else []
+                )
+                allergens_merged = list(
+                    dict.fromkeys(
+                        [
+                            *(values.get("allergens") or []),
+                            *allergen_custom_values,
+                        ]
+                    )
+                )
+                if bool(values.get("allergens_none_known", False)):
+                    allergens_merged = []
                 save_player_profile(
                     client,
                     selected_player["id"],
                     players_schema,
-                    diet=diet,
-                    allergens=allergens,
+                    diet=list(values.get("diet") or []),
+                    allergens=allergens_merged,
                     hard_no=hard_no_merged,
-                    bio_note=bio_note,
+                    bio_note=str(values.get("bio_note", "")),
                 )
 
-                if hard_no_other and is_host:
-                    push(
-                        "🔤 Sauvegarde · Normalisation",
-                        '- Vérification typo/duplication pour "autre".',
-                    )
+                if values.get("hard_no_other") and is_host:
+                    push("🔤 Sauvegarde · Options hard-no")
                     _ = ensure_multiselect_option(
                         client,
                         players_db_id,
                         "hard_no",
-                        hard_no_other,
+                        str(values.get("hard_no_other")),
                         similarity_threshold=0.90,
                     )
+                    _bust_cache()
+                if allergen_custom_values and is_host:
+                    push("🔤 Sauvegarde · Options allergènes")
+                    for allergen in allergen_custom_values:
+                        _ = ensure_multiselect_option(
+                            client,
+                            players_db_id,
+                            "allergens",
+                            allergen,
+                            similarity_threshold=0.90,
+                        )
+                    _bust_cache()
 
-                push("🗳️ Sauvegarde · Réponses", "- Écriture des réponses de session…")
+                push("🗳️ Sauvegarde · Réponses")
                 upsert_response(
                     client,
                     responses_db_id,
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["diet"],
-                    value=diet,
+                    question_id=qid_map["diet"],
+                    value=list(values.get("diet") or []),
                 )
                 upsert_response(
                     client,
@@ -1324,8 +1752,8 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["allergens"],
-                    value=allergens,
+                    question_id=qid_map["allergens"],
+                    value=allergens_merged,
                 )
                 upsert_response(
                     client,
@@ -1333,7 +1761,7 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["hard_no"],
+                    question_id=qid_map["hard_no"],
                     value=hard_no_merged,
                 )
                 upsert_response(
@@ -1342,8 +1770,8 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["spice"],
-                    value=spice,
+                    question_id=qid_map["spice"],
+                    value=int(values.get("spice", 3)),
                 )
                 upsert_response(
                     client,
@@ -1351,8 +1779,8 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["texture"],
-                    value=texture,
+                    question_id=qid_map["texture"],
+                    value=str(values.get("texture", "")),
                 )
                 upsert_response(
                     client,
@@ -1360,8 +1788,8 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["cravings"],
-                    value=[normalize_label(v) for v in (cravings or [])],
+                    question_id=qid_map["cravings"],
+                    value=[normalize_label(v) for v in (values.get("cravings") or [])],
                 )
                 upsert_response(
                     client,
@@ -1369,44 +1797,85 @@ def main() -> None:
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["surprise"],
-                    value=bool(surprise),
+                    question_id=qid_map["surprise"],
+                    value=bool(values.get("surprise", False)),
                 )
+                if qid_map.get("contribution"):
+                    push(
+                        "🗳️ Sauvegarde · Contribution",
+                    )
+                    upsert_response(
+                        client,
+                        responses_db_id,
+                        responses_schema,
+                        session_id=selected_session["id"],
+                        player_id=selected_player["id"],
+                        question_id=qid_map["contribution"],
+                        value=float(values.get("contribution_value", 0.0)),
+                    )
+                else:
+                    push(
+                        "⚠️ Sauvegarde · Contribution",
+                        "Question absente, contribution non enregistrée.",
+                    )
+                    LOGGER.warning(
+                        "save.skip contribution session_id=%s player_id=%s",
+                        selected_session["id"],
+                        selected_player["id"],
+                    )
                 upsert_response(
                     client,
                     responses_db_id,
                     responses_schema,
                     session_id=selected_session["id"],
                     player_id=selected_player["id"],
-                    question_id=qid_by_key["tonight_note"],
+                    question_id=qid_map["tonight_note"],
                     value={
-                        "note": tonight_note,
+                        "note": str(values.get("tonight_note", "")),
                         "condiments": {
-                            "ail": pref_ail,
-                            "oignon": pref_oignon,
-                            "coriandre": pref_coriandre,
+                            "ail": str(values.get("pref_ail", "ok")),
+                            "oignon": str(values.get("pref_oignon", "ok")),
+                            "coriandre": str(values.get("pref_coriandre", "ok")),
                         },
                     },
-                    tonight_note=tonight_note,
+                    tonight_note=str(values.get("tonight_note", "")),
                 )
 
-                push(
-                    "✅ Sauvegarde · Finalisation",
-                    "- Réponses enregistrées avec succès.",
+                push("✅ Sauvegarde · Finalisation")
+                summary = {
+                    "diet": list(values.get("diet") or []),
+                    "allergens": allergens_merged,
+                    "hard_no": hard_no_merged,
+                    "spice": int(values.get("spice", 3)),
+                    "texture": str(values.get("texture", "")),
+                    "cravings": [
+                        normalize_label(v) for v in (values.get("cravings") or [])
+                    ],
+                    "surprise": bool(values.get("surprise", False)),
+                    "contribution": float(values.get("contribution_value", 0.0)),
+                    "tonight_note": str(values.get("tonight_note", "")),
+                }
+                st.session_state["aff_last_save_summary"] = {
+                    "session_id": selected_session["id"],
+                    "player_id": selected_player["id"],
+                    "summary": summary,
+                }
+                LOGGER.info(
+                    "save.success session_id=%s player_id=%s summary=%s",
+                    selected_session["id"],
+                    selected_player["id"],
+                    json.dumps(summary, ensure_ascii=False),
                 )
                 st.success(
                     "✅ Merci. C'est noté. Tu peux modifier plus tard si besoin."
                 )
                 st.rerun()
             except Exception as exc:
-                push(
-                    "❌ Sauvegarde · Échec",
-                    "- Impossible d'écrire dans la base Notion.",
-                )
+                push("❌ Sauvegarde · Échec", repr(exc))
                 st.error("⚠️ Erreur : impossible d'écrire dans base de données.")
-                detail = str(exc)
-                if is_host:
-                    st.error(f"🔍 Détail : {detail}")
+                st.error(f"🔍 Détail : {exc}")
+                st.code(traceback.format_exc(), language="text")
+                LOGGER.exception("save.error")
 
         run_progress_expander(save_steps, _save_runner)
 

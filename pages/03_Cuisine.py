@@ -19,6 +19,7 @@ from infra.app_state import (
     ensure_session_state,
     remember_access,
 )
+from ui import apply_theme
 from infra.notion_repo import get_database_schema
 from lib.notion_options import ensure_multiselect_option
 from services.presence import count_active_users, touch_player_presence
@@ -237,7 +238,7 @@ def ensure_questionnaire_state(
         st.session_state["aff_form_values"] = {
             "diet": list(selected_player.get("diet", [])),
             "allergens": initial_allergens,
-            "allergens_mode": "Known allergens" if initial_allergens else "",
+            "allergens_mode": "Allergènes connus" if initial_allergens else "",
             "hard_no": list(selected_player.get("hard_no", [])),
             "allergen_other": "",
             "allergens_none_known": False,
@@ -273,9 +274,9 @@ def _required_answered(question_key: str, values: Dict[str, Any]) -> bool:
         ) or bool(custom)
     if question_key == "allergens":
         mode = str(values.get("allergens_mode", "")).strip()
-        if mode == "None known":
+        if mode in {"Aucun allergène connu", "None known"}:
             return True
-        if mode != "Known allergens":
+        if mode not in {"Allergènes connus", "Known allergens"}:
             return False
         custom = parse_csv_labels(values.get("allergen_other", ""))
         return (
@@ -1119,11 +1120,14 @@ def render_host_view(
 
 
 def main() -> None:
+    apply_theme()
+
     page_started = perf_counter()
     st.set_page_config(
         page_title="Les Affranchis · Cuisine",
         page_icon="🍲",
         # layout="wide"
+        initial_sidebar_state="collapsed",
     )
     st.title("Les Affranchis · Cuisine")
 
@@ -1142,7 +1146,7 @@ def main() -> None:
     if not authentication_status:
         st.warning("Please log in first.")
         if st.button("Go to Access", type="primary", use_container_width=True):
-            st.switch_page("pages/01_Login.py")
+            st.switch_page("pages/02_Login.py")
         st.stop()
     authenticator.logout(button_name="Se déconnecter", location="sidebar")
 
@@ -1336,8 +1340,7 @@ def main() -> None:
             active_12h,
         )
     st.metric(
-        "Affranchi·e·s actif·ve·s ces 12 dernières heures",
-        value=active_12h,
+        "Affranchi·e·s actif·ve·s", value=active_12h, help="En ces 12 dernières heures"
     )
 
     st.markdown("## 0 · Participation")
@@ -1478,13 +1481,13 @@ def main() -> None:
 
     mode = st.radio(
         "Mode",
-        options=["Necessary", "Extended"],
+        options=["Essentiel", "Étendu"],
         horizontal=True,
         index=0,
-        help="Necessary = shortest form. Extended = includes texture and cravings.",
+        help="Essentiel = formulaire le plus court. Étendu = inclut aussi les préférences de texture et les envies.",
     )
     active_keys = (
-        NECESSARY_KEYS if mode == "Necessary" else NECESSARY_KEYS + EXTENDED_ONLY_KEYS
+        NECESSARY_KEYS if mode == "Essentiel" else NECESSARY_KEYS + EXTENDED_ONLY_KEYS
     )
     active_catalog = [q for q in QUESTION_CATALOG if q["key"] in active_keys]
 
@@ -1505,7 +1508,7 @@ def main() -> None:
     )
     st.progress(answered_required / required_count if required_count else 0.0)
     st.caption(
-        f"Progression: étape {question_index + 1}/{total_questions} · requis {answered_required}/{required_count}"
+        f"Progression : étape {question_index + 1}/{total_questions} · requis {answered_required}/{required_count}"
     )
 
     title_prompt = current["prompt"]
@@ -1519,41 +1522,53 @@ def main() -> None:
             "Regime / preference", options=diet_options, default=values.get("diet", [])
         )
     elif key == "allergens":
-        mode_options = ["Choose one", "Known allergens", "None known"]
-        mode_value = values.get("allergens_mode", "")
+        mode_options = [
+            "Choisir une option",
+            "Allergènes connus",
+            "Aucun allergène connu",
+        ]
+        mode_value = str(values.get("allergens_mode", ""))
+        if mode_value == "Known allergens":
+            mode_value = "Allergènes connus"
+        elif mode_value == "None known":
+            mode_value = "Aucun allergène connu"
         mode_index = mode_options.index(mode_value) if mode_value in mode_options else 0
         selected_mode = st.radio(
-            "Allergènes (required)",
+            "Allergènes (requis)",
             options=mode_options,
             index=mode_index,
             horizontal=True,
         )
         values["allergens_mode"] = (
-            selected_mode if selected_mode != "Choose one" else ""
+            selected_mode if selected_mode != "Choisir une option" else ""
         )
-        values["allergens_none_known"] = values["allergens_mode"] == "None known"
+        values["allergens_none_known"] = (
+            values["allergens_mode"] == "Aucun allergène connu"
+        )
         if values["allergens_none_known"]:
             values["allergens"] = []
             values["allergen_other"] = ""
-            st.caption("No known allergens selected.")
-        elif values["allergens_mode"] == "Known allergens":
+            st.caption("Aucun allergène connu sélectionné.")
+        elif values["allergens_mode"] == "Allergènes connus":
             values["allergens"] = st.multiselect(
-                "Allergens",
+                "Allergènes",
                 options=allergens_options,
                 default=values.get("allergens", []),
             )
             values["allergen_other"] = normalize_label(
                 st.text_input(
-                    "Other allergens (optional, comma-separated)",
+                    "Autres allergènes (optionnel, séparés par des virgules)",
                     value=values.get("allergen_other", ""),
-                    help="Example: sesame, buckwheat, kiwi",
+                    help="Exemple : sésame, sarrasin, kiwi",
                 )
             )
-            st.caption("Use commas to add multiple custom allergens.")
+            st.caption("Utilise des virgules pour ajouter plusieurs allergènes.")
         else:
             values["allergens"] = []
             values["allergen_other"] = ""
-            st.info("Please choose either 'Known allergens' or 'None known'.")
+            st.info(
+                "Choisis soit « Allergènes connus », soit « Aucun allergène connu »."
+            )
     elif key == "hard_no":
         values["hard_no_none"] = (
             st.radio(
@@ -1724,40 +1739,48 @@ def main() -> None:
     is_required_current = bool(current.get("required"))
     can_next = (not is_required_current) or _required_answered(key, values)
 
-    missing_items: List[str] = []
-    for q in QUESTION_CATALOG:
-        if q["key"] not in active_keys:
-            continue
+    missing_items_all: List[str] = []
+    missing_items_visible: List[str] = []
+    active_catalog_index = {q["key"]: idx for idx, q in enumerate(active_catalog)}
+
+    def _push_missing(question_key: str, message: str) -> None:
+        missing_items_all.append(message)
+        if active_catalog_index.get(question_key, 10**6) <= question_index:
+            missing_items_visible.append(message)
+
+    for q in active_catalog:
         if not q.get("required"):
             continue
         if _required_answered(q["key"], values):
             continue
         if q["key"] == "diet":
-            missing_items.append("Regime / preference: pick at least one option.")
+            _push_missing("diet", "Regime / preference: pick at least one option.")
         elif q["key"] == "allergens":
-            missing_items.append(
-                "Allergènes: pick one allergen or choose 'None known'."
+            _push_missing(
+                "allergens", "Allergènes: pick one allergen or choose 'None known'."
             )
         elif q["key"] == "hard_no":
-            missing_items.append(
-                "Ingrédients non: pick one exclusion or choose 'No ingredient restrictions'."
+            _push_missing(
+                "hard_no",
+                "Ingrédients non: pick one exclusion or choose 'No ingredient restrictions'.",
             )
         elif q["key"] == "spice":
-            missing_items.append(
-                "Piquant & Condiments: set your spice level and condiments."
+            _push_missing(
+                "spice", "Piquant & Condiments: set your spice level and condiments."
             )
         elif q["key"] == "texture":
-            missing_items.append("Texture: choose one texture option.")
+            _push_missing("texture", "Texture: choose one texture option.")
         elif q["key"] == "cravings":
-            missing_items.append("Envies du moment: choose at least one craving.")
-    if not _is_valid_contribution(values.get("contribution_value")):
-        missing_items.append(
-            "Contribution (EUR): choose 0 / 1 / 10 / 15 / 20 / 30, or enter a custom amount in [1, 100000]."
-        )
+            _push_missing("cravings", "Envies du moment: choose at least one craving.")
+        elif q["key"] == "contribution":
+            _push_missing(
+                "contribution",
+                "Contribution (EUR): choose 0 / 1 / 10 / 15 / 20 / 30, or enter a custom amount in [1, 100000].",
+            )
 
-    if missing_items:
+    if missing_items_visible:
         st.info("Almost there. Please complete these required choices:")
-        for item in missing_items:
+        for item in missing_items_visible:
             st.markdown(f"- {item}")
 
     submit_now = False
@@ -1777,7 +1800,7 @@ def main() -> None:
             )
             st.rerun()
     with col_submit:
-        save_ready = len(missing_items) == 0
+        save_ready = len(missing_items_all) == 0
         last_save = st.session_state.get("aff_last_save_summary")
         is_update = bool(
             isinstance(last_save, dict)
@@ -1827,8 +1850,10 @@ def main() -> None:
             )
             col_done, col_review = st.columns(2)
             with col_done:
-                if st.button("Terminer", type="primary", use_container_width=True):
-                    st.switch_page("pages/02_Home.py")
+                if st.button(
+                    "Aller au lobby", type="primary", use_container_width=True
+                ):
+                    st.switch_page("pages/04_Home.py")
             with col_review:
                 if st.button("Revoir mes réponses", use_container_width=True):
                     st.session_state["aff_show_save_success_once"] = False
@@ -1836,7 +1861,7 @@ def main() -> None:
             st.session_state["aff_show_save_success_once"] = False
 
     if submit_now:
-        if missing_items:
+        if missing_items_all:
             st.error("⚠️ Some required inputs are still missing.")
             st.caption(
                 "Please complete the items listed above, then click Enregistrer."
@@ -2111,6 +2136,20 @@ def main() -> None:
                 LOGGER.exception("save.error")
 
         run_progress_expander(save_steps, _save_runner)
+
+    last_save = st.session_state.get("aff_last_save_summary")
+    if isinstance(last_save, dict) and (
+        last_save.get("player_id") == selected_player["id"]
+        and last_save.get("session_id") == selected_session["id"]
+    ):
+        st.markdown("---")
+        if st.button(
+            "Aller au lobby",
+            type="primary",
+            use_container_width=True,
+            key="cuisine-go-home-after-save",
+        ):
+            st.switch_page("pages/04_Home.py")
 
     LOGGER.info("perf.page_total_ms=%.1f", (perf_counter() - page_started) * 1000)
 

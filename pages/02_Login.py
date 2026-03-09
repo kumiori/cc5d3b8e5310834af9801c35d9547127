@@ -73,7 +73,7 @@ def _stream_access_intro(skip: bool = False) -> None:
         st.markdown("Chaque participant·e entre avec une clé personnelle.")
         st.markdown("Si tu en as déjà une, connecte-toi. Sinon, crée-la ici.")
         return
-    st.write_stream(_stream_chunk("Accès", punctuation_pause=0.14))
+    st.write_stream(_stream_chunk("### Accès", punctuation_pause=0.14))
     time.sleep(0.48)
     st.write_stream(
         _stream_chunk("Chaque participant·e entre avec une clé personnelle.")
@@ -146,7 +146,7 @@ def _render_login_panel(authenticator: Any) -> None:
             use_container_width=True,
             key="access-login-continue-btn",
         ):
-            st.switch_page("pages/01_Cuisine.py")
+            st.switch_page("pages/03_Cuisine.py")
 
 
 def _render_mint_panel(authenticator: Any) -> None:
@@ -283,7 +283,7 @@ def _render_mint_result(authenticator: Any) -> None:
                     auto_login_ok = False
 
             if auto_login_ok:
-                st.switch_page("pages/01_Cuisine.py")
+                st.switch_page("pages/03_Cuisine.py")
             else:
                 st.session_state["login_access_key_prefill"] = str(
                     mint_result.get("emoji4", "")

@@ -14,7 +14,8 @@ def set_page() -> None:
         page_title=settings.app_title,
         page_icon="🪶",
         layout="centered",
-        initial_sidebar_state="expanded",
+        # initial_sidebar_state="expanded",
+        initial_sidebar_state="collapsed",
     )
 
 

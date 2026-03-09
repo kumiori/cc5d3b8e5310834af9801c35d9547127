@@ -93,7 +93,11 @@ def remember_access(payload: Dict) -> None:
         st.session_state.session_id = session_id
 
 
-st.set_page_config(page_title="Clés d'accès · Les Affranchis", page_icon="🔑")
+st.set_page_config(
+    page_title="Clés d'accès · Les Affranchis",
+    page_icon="🔑",
+    initial_sidebar_state="collapsed",
+)
 st.title("🔑 Clés d'accès · Les Affranchis")
 st.caption("Créez ou saisissez une clé d'accès pour rejoindre la session.")
 

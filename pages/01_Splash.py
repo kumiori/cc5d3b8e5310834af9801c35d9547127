@@ -30,20 +30,20 @@ def _stream_chunk(text: str, *, punctuation_pause: float = 0.08):
 
 def _render_streamed_intro(skip: bool = False) -> None:
     if skip:
-        st.markdown("## Les Affranchi·e·s")
+        st.markdown("# Les Affranchi·e·s")
         st.markdown(
-            "Un collectif pour se reconnaître, se relier, et agir sans logique de domination."
+            "### Un collectif pour se reconnaître, se relier, et agir sans logique de domination."
         )
         st.markdown(
             "Cette forme-plate te permet d’entrer dans une session et d’y prendre part."
         )
         return
 
-    st.write_stream(_stream_chunk("### Les Affranchi·e·s", punctuation_pause=0.15))
+    st.write_stream(_stream_chunk("# Les Affranchi·e·s", punctuation_pause=0.15))
     time.sleep(0.52)
     st.write_stream(
         _stream_chunk(
-            "Un collectif pour se reconnaître, se relier, et agir au-delà des logiques de domination."
+            "### Un collectif pour se reconnaître, se relier, et agir au-delà des logiques de domination."
         )
     )
     time.sleep(0.42)
@@ -72,7 +72,7 @@ def main() -> None:
 
     st.divider()
     if st.button("Je continue", type="primary", use_container_width=True):
-        st.switch_page("pages/01_Login.py")
+        st.switch_page("pages/02_Login.py")
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from infra.app_state import (
     remember_access,
     require_login,
 )
+from services.presence import count_active_users
 from ui import (
     apply_theme,
     heading,
@@ -35,16 +36,22 @@ def main() -> None:
     heading("Salon de session")
     session_title = st.session_state.get("session_title") or "Session active"
     microcopy(session_title)
+    active_12h = count_active_users(
+        window_minutes=12 * 60, session_id=st.session_state.get("session_id", "")
+    )
+    st.metric("Affranchi·e·s actif·ve·s", active_12h, help="ces 12 dernières heures")
     cracks_globe_block(
         [],
         height=260,
         key="home-header-cracks",
         auto_rotate_speed=1.8,
     )
-
-    st.write("Actions rapides")
+    # st.caption("La sphère sur la planète.")
+    st.write("Navigation :")
+    if st.button("L'Idée", use_container_width=True):
+        st.switch_page("app.py")
     if st.button("Préferences cuisine", use_container_width=True):
-        st.switch_page("pages/01_Cuisine.py")
+        st.switch_page("pages/03_Cuisine.py")
     if st.button(
         "Décisions (après dinêr, si affinités)", disabled=True, use_container_width=True
     ):
@@ -69,7 +76,7 @@ def main() -> None:
         questions = repo.list_questions(
             st.session_state["session_id"], status="approved"
         )
-        st.caption(f"Questions publiées : {len(questions)}")
+        st.caption(f"Préferences partagées : {len(questions)}")
 
 
 if __name__ == "__main__":
