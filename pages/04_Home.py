@@ -54,6 +54,8 @@ def main() -> None:
         st.switch_page("pages/07_Admin.py")
     if st.button("Préferences cuisine", use_container_width=True):
         st.switch_page("pages/03_Cuisine.py")
+    if st.button("Mon espace participant", use_container_width=True):
+        st.switch_page("pages/09_Participant.py")
     if st.button(
         "Décisions (après dinêr, si affinités)", disabled=True, use_container_width=True
     ):

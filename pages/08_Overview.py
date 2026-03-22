@@ -1,140 +1,36 @@
 from __future__ import annotations
 
-import json
 from collections import Counter
 from datetime import datetime
 from statistics import mean, median
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 import re
 
 import pandas as pd
 import streamlit as st
 
 from infra.app_context import get_authenticator, get_notion_repo
-from infra.app_state import ensure_auth, ensure_session_context, ensure_session_state, remember_access, require_login
+from infra.app_state import ensure_session_context, ensure_session_state, remember_access
 from infra.notion_repo import _execute_with_retry, _resolve_data_source_id, get_database_schema
-from ui import apply_theme, set_page
-
-
-def _find_prop(schema: Dict[str, Any], expected: str, ptype: Optional[str] = None) -> str:
-    if expected in schema:
-        return expected
-    if ptype:
-        for name, meta in schema.items():
-            if isinstance(meta, dict) and meta.get("type") == ptype:
-                return str(name)
-    return expected
-
-
-def _find_exact_prop(schema: Dict[str, Any], names: List[str], ptype: str) -> str:
-    for name in names:
-        meta = schema.get(name)
-        if isinstance(meta, dict) and meta.get("type") == ptype:
-            return name
-    return ""
-
-
-def _rt(props: Dict[str, Any], name: str) -> str:
-    value = props.get(name)
-    if not isinstance(value, dict) or value.get("type") != "rich_text":
-        return ""
-    return "".join(part.get("plain_text", "") for part in value.get("rich_text", []) if isinstance(part, dict))
-
-
-def _title(props: Dict[str, Any], name: str) -> str:
-    value = props.get(name)
-    if not isinstance(value, dict) or value.get("type") != "title":
-        return ""
-    return "".join(part.get("plain_text", "") for part in value.get("title", []) if isinstance(part, dict))
-
-
-def _relation_first(props: Dict[str, Any], name: str) -> str:
-    value = props.get(name)
-    if not isinstance(value, dict) or value.get("type") != "relation":
-        return ""
-    rel = value.get("relation", [])
-    if rel and isinstance(rel[0], dict):
-        return str(rel[0].get("id") or "")
-    return ""
-
-
-def _select_name(props: Dict[str, Any], name: str) -> str:
-    value = props.get(name)
-    if not isinstance(value, dict):
-        return ""
-    selected = value.get("select")
-    if not isinstance(selected, dict):
-        return ""
-    return str(selected.get("name") or "")
-
-
-def _checkbox_value(props: Dict[str, Any], name: str) -> bool:
-    value = props.get(name)
-    if not isinstance(value, dict):
-        return False
-    return bool(value.get("checkbox"))
-
-
-def _number(props: Dict[str, Any], name: str) -> Optional[float]:
-    value = props.get(name)
-    if not isinstance(value, dict) or value.get("type") != "number":
-        return None
-    raw = value.get("number")
-    if raw is None:
-        return None
-    try:
-        return float(raw)
-    except Exception:
-        return None
-
-
-def _from_json_text(text: str) -> Any:
-    raw = str(text or "").strip()
-    if not raw:
-        return ""
-    try:
-        return json.loads(raw)
-    except Exception:
-        return raw
-
-
-def _parse_numeric_value(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
-        cleaned = value.strip().replace(",", ".")
-        if not cleaned:
-            return None
-        try:
-            return float(cleaned)
-        except Exception:
-            return None
-    return None
-
-
-def _as_list_labels(value: Any) -> List[str]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return []
-        if text.startswith("[") and text.endswith("]"):
-            try:
-                parsed = json.loads(text)
-                if isinstance(parsed, list):
-                    return [str(v).strip() for v in parsed if str(v).strip()]
-            except Exception:
-                pass
-        return [text]
-    return []
+from services.notion_value_utils import (
+    as_list_labels,
+    find_exact_prop,
+    find_prop,
+    parse_json_text,
+    parse_number,
+    read_checkbox,
+    read_multiselect_names,
+    read_number,
+    read_relation_first,
+    read_rich_text,
+    read_select_name,
+    read_title,
+)
+from ui import apply_theme, set_page, sidebar_auth_controls, sidebar_technical_debug
 
 
 def _list_sessions_from_db(repo: Any, *, limit: int = 300) -> List[Dict[str, Any]]:
+    """Load sessions directly from Notion with schema-based property resolution."""
     sessions_db_id = str(getattr(repo, "session_db_id", "") or "")
     if not sessions_db_id:
         return []
@@ -142,16 +38,16 @@ def _list_sessions_from_db(repo: Any, *, limit: int = 300) -> List[Dict[str, Any
     if not ds_id:
         return []
     schema = get_database_schema(repo.client, sessions_db_id)
-    code_prop = _find_prop(schema, "session_code", "rich_text")
-    code_title_prop = _find_prop(schema, "session_code", "title")
-    name_prop = _find_prop(schema, "session_name", "rich_text")
-    name_title_prop = _find_prop(schema, "session_name", "title")
-    title_prop = _find_prop(schema, "session_title", "rich_text")
-    title_title_prop = _find_prop(schema, "session_title", "title")
-    default_title_prop = _find_prop(schema, "Name", "title")
-    status_prop = _find_prop(schema, "status", "select")
-    active_prop = _find_prop(schema, "active", "checkbox")
-    mode_prop = _find_prop(schema, "mode", "select")
+    code_prop = find_prop(schema, "session_code", "rich_text")
+    code_title_prop = find_prop(schema, "session_code", "title")
+    name_prop = find_prop(schema, "session_name", "rich_text")
+    name_title_prop = find_prop(schema, "session_name", "title")
+    title_prop = find_prop(schema, "session_title", "rich_text")
+    title_title_prop = find_prop(schema, "session_title", "title")
+    default_title_prop = find_prop(schema, "Name", "title")
+    status_prop = find_prop(schema, "status", "select")
+    active_prop = find_prop(schema, "active", "checkbox")
+    mode_prop = find_prop(schema, "mode", "select")
 
     out: List[Dict[str, Any]] = []
     query: Dict[str, Any] = {
@@ -164,22 +60,22 @@ def _list_sessions_from_db(repo: Any, *, limit: int = 300) -> List[Dict[str, Any
         for page in payload.get("results", []):
             props = page.get("properties", {}) if isinstance(page, dict) else {}
             session_code = (
-                _rt(props, code_prop)
-                or _title(props, code_title_prop)
-                or _rt(props, name_prop)
-                or _title(props, name_title_prop)
-                or _rt(props, title_prop)
-                or _title(props, title_title_prop)
-                or _title(props, default_title_prop)
+                read_rich_text(props, code_prop)
+                or read_title(props, code_title_prop)
+                or read_rich_text(props, name_prop)
+                or read_title(props, name_title_prop)
+                or read_rich_text(props, title_prop)
+                or read_title(props, title_title_prop)
+                or read_title(props, default_title_prop)
                 or "session"
             )
             out.append(
                 {
                     "id": str(page.get("id") or ""),
                     "session_code": session_code,
-                    "status": _select_name(props, status_prop),
-                    "mode": _select_name(props, mode_prop),
-                    "active": _checkbox_value(props, active_prop),
+                    "status": read_select_name(props, status_prop),
+                    "mode": read_select_name(props, mode_prop),
+                    "active": read_checkbox(props, active_prop),
                 }
             )
         if not payload.get("has_more") or len(out) >= limit:
@@ -195,6 +91,7 @@ def _list_sessions_from_db(repo: Any, *, limit: int = 300) -> List[Dict[str, Any
 
 
 def _load_responses_for_session(repo: Any, session_id: str) -> List[Dict[str, Any]]:
+    """Load response rows for one session and normalize key columns."""
     responses_db_id = str(getattr(repo, "responses_db_id", "") or "")
     if not responses_db_id:
         return []
@@ -202,14 +99,14 @@ def _load_responses_for_session(repo: Any, session_id: str) -> List[Dict[str, An
     if not ds_id:
         return []
     schema = get_database_schema(repo.client, responses_db_id)
-    session_prop = _find_exact_prop(schema, ["session"], "relation")
-    player_prop = _find_exact_prop(schema, ["player"], "relation")
-    question_rel_prop = _find_exact_prop(schema, ["question", "statement"], "relation")
-    question_id_prop = _find_exact_prop(schema, ["question_id"], "rich_text")
-    item_id_prop = _find_exact_prop(schema, ["item_id"], "rich_text")
-    value_prop = _find_exact_prop(schema, ["value"], "rich_text")
-    value_number_prop = _find_exact_prop(schema, ["value_number"], "number")
-    title_prop = _find_exact_prop(schema, ["Name"], "title")
+    session_prop = find_exact_prop(schema, ["session"], "relation")
+    player_prop = find_exact_prop(schema, ["player"], "relation")
+    question_rel_prop = find_exact_prop(schema, ["question", "statement"], "relation")
+    question_id_prop = find_exact_prop(schema, ["question_id"], "rich_text")
+    item_id_prop = find_exact_prop(schema, ["item_id"], "rich_text")
+    value_prop = find_exact_prop(schema, ["value"], "rich_text")
+    value_number_prop = find_exact_prop(schema, ["value_number"], "number")
+    title_prop = find_exact_prop(schema, ["Name"], "title")
 
     query: Dict[str, Any] = {
         "data_source_id": ds_id,
@@ -223,25 +120,25 @@ def _load_responses_for_session(repo: Any, session_id: str) -> List[Dict[str, An
         payload = _execute_with_retry(repo.client.data_sources.query, **query)
         for page in payload.get("results", []):
             props = page.get("properties", {}) if isinstance(page, dict) else {}
-            qid = _relation_first(props, question_rel_prop) or _rt(props, question_id_prop) or _rt(props, item_id_prop)
-            title_text = _title(props, title_prop)
+            qid = read_relation_first(props, question_rel_prop) or read_rich_text(props, question_id_prop) or read_rich_text(props, item_id_prop)
+            title_text = read_title(props, title_prop)
             if not qid and title_text:
                 m = re.search(r"Q:([0-9a-fA-F-]{16,40})", title_text)
                 if m:
                     qid = m.group(1)
-            player_id = _relation_first(props, player_prop)
+            player_id = read_relation_first(props, player_prop)
             if not player_id and title_text:
                 mp = re.search(r"P:([0-9a-fA-F-]{16,40})", title_text)
                 if mp:
                     player_id = mp.group(1)
-            value_raw = _rt(props, value_prop) if value_prop else ""
+            value_raw = read_rich_text(props, value_prop) if value_prop else ""
             out.append(
                 {
                     "id": str(page.get("id") or ""),
                     "player_id": player_id,
                     "question_id": qid,
-                    "value": _from_json_text(value_raw),
-                    "value_number": _number(props, value_number_prop) if value_number_prop else None,
+                    "value": parse_json_text(value_raw),
+                    "value_number": read_number(props, value_number_prop) if value_number_prop else None,
                     "created_at": str(page.get("created_time") or ""),
                     "title_key": title_text,
                 }
@@ -253,6 +150,7 @@ def _load_responses_for_session(repo: Any, session_id: str) -> List[Dict[str, An
 
 
 def _latest_by_player_question(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Keep latest row per player/question based on created_at ordering."""
     latest: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for row in sorted(rows, key=lambda x: str(x.get("created_at") or ""), reverse=True):
         pid = str(row.get("player_id") or "")
@@ -266,6 +164,7 @@ def _latest_by_player_question(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str
 
 
 def _contribution_question_ids(questions: List[Dict[str, Any]]) -> List[str]:
+    """Extract question ids that look like contribution prompts."""
     ids: List[str] = []
     for q in questions:
         text = str(q.get("text") or "").lower()
@@ -277,6 +176,7 @@ def _contribution_question_ids(questions: List[Dict[str, Any]]) -> List[str]:
 
 
 def _question_ids_for(questions: List[Dict[str, Any]], key: str) -> List[str]:
+    """Extract question ids for semantic buckets used in overview aggregates."""
     aliases = {
         "diet": ["régime", "regime", "preference", "préférence"],
         "allergens": ["allergène", "allergen"],
@@ -295,16 +195,17 @@ def _question_ids_for(questions: List[Dict[str, Any]], key: str) -> List[str]:
 
 
 def _load_player_page_profiles(repo: Any, player_page_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """Load player profile fields for a set of player page ids."""
     players_db_id = str(getattr(repo, "players_db_id", "") or "")
     if not players_db_id:
         return {}
     schema = get_database_schema(repo.client, players_db_id)
-    nickname_prop = _find_prop(schema, "nickname", "rich_text")
-    title_prop = _find_prop(schema, "Name", "title")
-    access_prop = _find_prop(schema, "access_key", "rich_text")
-    diet_prop = _find_prop(schema, "diet", "multi_select")
-    allergens_prop = _find_prop(schema, "allergens", "multi_select")
-    hard_no_prop = _find_prop(schema, "hard_no", "multi_select")
+    nickname_prop = find_prop(schema, "nickname", "rich_text")
+    title_prop = find_prop(schema, "Name", "title")
+    access_prop = find_prop(schema, "access_key", "rich_text")
+    diet_prop = find_prop(schema, "diet", "multi_select")
+    allergens_prop = find_prop(schema, "allergens", "multi_select")
+    hard_no_prop = find_prop(schema, "hard_no", "multi_select")
     out: Dict[str, Dict[str, Any]] = {}
     for pid in sorted(set(player_page_ids)):
         if not pid:
@@ -314,30 +215,19 @@ def _load_player_page_profiles(repo: Any, player_page_ids: List[str]) -> Dict[st
         except Exception:
             continue
         props = page.get("properties", {}) if isinstance(page, dict) else {}
-        diet_vals = []
-        allerg_vals = []
-        hard_no_vals = []
-        for raw in ((props.get(diet_prop) or {}).get("multi_select", []) if isinstance(props.get(diet_prop), dict) else []):
-            if isinstance(raw, dict) and raw.get("name"):
-                diet_vals.append(str(raw.get("name")))
-        for raw in ((props.get(allergens_prop) or {}).get("multi_select", []) if isinstance(props.get(allergens_prop), dict) else []):
-            if isinstance(raw, dict) and raw.get("name"):
-                allerg_vals.append(str(raw.get("name")))
-        for raw in ((props.get(hard_no_prop) or {}).get("multi_select", []) if isinstance(props.get(hard_no_prop), dict) else []):
-            if isinstance(raw, dict) and raw.get("name"):
-                hard_no_vals.append(str(raw.get("name")))
         out[pid] = {
             "id": pid,
-            "nickname": _rt(props, nickname_prop) or _title(props, title_prop) or pid[:8],
-            "access_key": _rt(props, access_prop),
-            "diet": diet_vals,
-            "allergens": allerg_vals,
-            "hard_no": hard_no_vals,
+            "nickname": read_rich_text(props, nickname_prop) or read_title(props, title_prop) or pid[:8],
+            "access_key": read_rich_text(props, access_prop),
+            "diet": read_multiselect_names(props, diet_prop),
+            "allergens": read_multiselect_names(props, allergens_prop),
+            "hard_no": read_multiselect_names(props, hard_no_prop),
         }
     return out
 
 
 def _session_summary(repo: Any, session: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute aggregate and per-player summaries for a selected session."""
     session_id = str(session.get("id") or "")
     questions = repo.list_questions(session_id)
     responses = _load_responses_for_session(repo, session_id)
@@ -383,11 +273,11 @@ def _session_summary(repo: Any, session: Dict[str, Any]) -> Dict[str, Any]:
         response_allergens: List[str] = []
         response_hard_no: List[str] = []
         for qid in diet_qids:
-            response_diet.extend(_as_list_labels((qmap.get(qid) or {}).get("value")))
+            response_diet.extend(as_list_labels((qmap.get(qid) or {}).get("value")))
         for qid in allerg_qids:
-            response_allergens.extend(_as_list_labels((qmap.get(qid) or {}).get("value")))
+            response_allergens.extend(as_list_labels((qmap.get(qid) or {}).get("value")))
         for qid in hard_no_qids:
-            response_hard_no.extend(_as_list_labels((qmap.get(qid) or {}).get("value")))
+            response_hard_no.extend(as_list_labels((qmap.get(qid) or {}).get("value")))
 
         effective_diet = response_diet or list(player.get("diet", []) or [])
         effective_allergens = response_allergens or list(player.get("allergens", []) or [])
@@ -406,9 +296,9 @@ def _session_summary(repo: Any, session: Dict[str, Any]) -> Dict[str, Any]:
             row = qmap.get(qid)
             if not row:
                 continue
-            contribution = _parse_numeric_value(row.get("value_number"))
+            contribution = parse_number(row.get("value_number"))
             if contribution is None:
-                contribution = _parse_numeric_value(row.get("value"))
+                contribution = parse_number(row.get("value"))
             if contribution is not None:
                 matched_qid = qid
                 break
@@ -462,21 +352,34 @@ def _session_summary(repo: Any, session: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> None:
+    """Render session-level cuisine aggregates with debug and exports."""
     set_page()
     apply_theme()
     ensure_session_state()
     repo = get_notion_repo()
-    authenticator = get_authenticator(repo)
-    ensure_auth(authenticator, callback=remember_access, key="overview-login")
-    ensure_session_context(repo)
-    require_login()
-
-    st.title("Overview · Cuisine")
-    st.caption("Aggregate responses per session: kitchen preferences and prospective contributions.")
-
     if not repo:
         st.error("Notion repository unavailable.")
         st.stop()
+    authenticator = get_authenticator(repo)
+    authentication_status = sidebar_auth_controls(
+        authenticator,
+        callback=remember_access,
+        key_prefix="overview-auth",
+    )
+    ensure_session_context(repo)
+    sidebar_technical_debug(
+        page_label="08_Overview",
+        repo=repo,
+        extra={
+            "overview_cache_keys": len(st.session_state.get("_overview_cache", {})),
+        },
+    )
+    if not authentication_status:
+        st.warning("Please log in first.")
+        st.stop()
+
+    st.title("Overview · Cuisine")
+    st.caption("Aggregate responses per session: kitchen preferences and prospective contributions.")
 
     sessions = _list_sessions_from_db(repo, limit=300)
     if not sessions:

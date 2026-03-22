@@ -8,11 +8,9 @@ import streamlit as st
 
 from infra.app_context import get_authenticator, get_notion_repo
 from infra.app_state import (
-    ensure_auth,
     ensure_session_context,
     ensure_session_state,
     remember_access,
-    require_login,
 )
 from repositories.session_repo import SessionRepository
 from services.admin_data import (
@@ -32,12 +30,13 @@ from services.duplicate_detection import (
     log_duplicate_merge_invite,
     mark_candidate_unrelated,
 )
-from ui import apply_theme, set_page
+from ui import apply_theme, set_page, sidebar_auth_controls, sidebar_technical_debug
 
 PAGE_ID = "07_Admin"
 
 
 def begin_timed_task(task_name: str) -> float:
+    """Start timing an admin task and register initial trace metadata."""
     started = time.perf_counter()
     st.session_state.setdefault("_admin_timing_traces", [])
     st.session_state["_admin_last_task"] = task_name
@@ -46,6 +45,7 @@ def begin_timed_task(task_name: str) -> float:
 
 
 def end_timed_task(start_ts: float, task_name: str) -> None:
+    """Close timed task and push elapsed measurement to sidebar traces."""
     elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
     traces = st.session_state.setdefault("_admin_timing_traces", [])
     traces.insert(
@@ -65,6 +65,7 @@ def render_sidebar_operational_context(
     player_summary: Dict[str, Any],
     system_summary: Dict[str, Any],
 ) -> None:
+    """Render compact operational context and timing traces in sidebar."""
     with st.sidebar:
         st.markdown("### Admin · Contexte")
         st.caption(f"Session ciblée: {session_label or '—'}")
@@ -86,11 +87,13 @@ def render_sidebar_operational_context(
 
 
 def render_admin_header() -> None:
+    """Render admin page title and subtitle."""
     st.title("Administration")
     st.caption("Pilotage des sessions, des joueurs et maintenance opérationnelle.")
 
 
 def _refresh_button() -> None:
+    """Render explicit refresh action and invalidate admin caches."""
     if st.button("Rafraîchir les données", use_container_width=True):
         clear_admin_caches()
         st.session_state["_admin_players_loaded"] = False
@@ -100,6 +103,7 @@ def _refresh_button() -> None:
 
 
 def render_sessions_panel(repo: Any) -> None:
+    """Render session list and inline actions for activation/metadata updates."""
     st.subheader("Session management")
     start = begin_timed_task("sessions.load")
     try:
@@ -231,6 +235,7 @@ def render_sessions_panel(repo: Any) -> None:
 
 
 def render_players_dashboard(repo: Any, session_id: str) -> Dict[str, int]:
+    """Render player metrics/table and return computed summary counters."""
     st.subheader("Players dashboard")
     force_refresh = bool(st.session_state.get("_admin_players_force_refresh", False))
     with st.spinner("Chargement joueurs + préférences contact..."):
@@ -266,6 +271,7 @@ def render_players_dashboard(repo: Any, session_id: str) -> Dict[str, int]:
 
 
 def render_duplicate_players_panel(repo: Any) -> Dict[str, Any]:
+    """Render manual duplicate scan controls and candidate results."""
     st.subheader("Potential duplicate players")
     st.caption("Contrôle manuel uniquement. Aucun merge/suppression automatique.")
     st.info(duplicate_rule_text())
@@ -344,6 +350,7 @@ def render_duplicate_players_panel(repo: Any) -> Dict[str, Any]:
 
 
 def _render_optional_admin_controls(repo: Any) -> None:
+    """Render optional maintenance controls for admins."""
     with st.expander("Optional admin controls", expanded=False):
         st.caption("Schema/status checks and maintenance actions.")
         st.json(
@@ -362,18 +369,32 @@ def _render_optional_admin_controls(repo: Any) -> None:
 
 
 def main() -> None:
+    """Entrypoint for admin dashboard page."""
     set_page()
     apply_theme()
     ensure_session_state()
     repo = get_notion_repo()
-    authenticator = get_authenticator(repo)
-    ensure_auth(authenticator, callback=remember_access, key="admin-login")
-    ensure_session_context(repo)
-    require_login()
-
     if not repo:
         st.error("Notion repository unavailable.")
         return
+    authenticator = get_authenticator(repo)
+    authentication_status = sidebar_auth_controls(
+        authenticator,
+        callback=remember_access,
+        key_prefix="admin-auth",
+    )
+    ensure_session_context(repo)
+    sidebar_technical_debug(
+        page_label="07_Admin",
+        repo=repo,
+        extra={
+            "timing_trace_count": len(st.session_state.get("_admin_timing_traces", [])),
+            "duplicate_scan_runs": int(st.session_state.get("_admin_duplicate_scan_runs", 0)),
+        },
+    )
+    if not authentication_status:
+        st.warning("Please log in first.")
+        st.stop()
 
     render_admin_header()
     _refresh_button()

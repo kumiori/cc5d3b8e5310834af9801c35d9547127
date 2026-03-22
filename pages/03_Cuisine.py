@@ -15,11 +15,10 @@ from notion_client import Client
 
 from infra.app_context import get_authenticator, get_notion_repo
 from infra.app_state import (
-    ensure_auth,
     ensure_session_state,
     remember_access,
 )
-from ui import apply_theme
+from ui import apply_theme, sidebar_auth_controls, sidebar_technical_debug
 from infra.notion_repo import get_database_schema
 from lib.notion_options import ensure_multiselect_option
 from services.presence import count_active_users, touch_player_presence
@@ -118,22 +117,27 @@ if not LOGGER.handlers:
 
 # ---------- helpers ----------
 def debug(msg: str) -> None:
+    """Render inline debug message."""
     st.markdown(msg)
 
 
 def _cache_store() -> Dict[str, Any]:
+    """Return session cache container used by cached reads."""
     return st.session_state.setdefault("aff_read_cache", {})
 
 
 def _cache_bust_token() -> int:
+    """Return current cache invalidation token."""
     return int(st.session_state.get("aff_cache_bust", 0))
 
 
 def _bust_cache() -> None:
+    """Invalidate cached reads by incrementing token."""
     st.session_state["aff_cache_bust"] = _cache_bust_token() + 1
 
 
 def cached_read(cache_key: str, loader):
+    """Read from session cache or compute value from loader."""
     token = _cache_bust_token()
     key = f"{cache_key}|v{token}"
     cache = _cache_store()
@@ -145,6 +149,7 @@ def cached_read(cache_key: str, loader):
 
 
 def timed_call(label: str, fn):
+    """Execute callable and log elapsed time for diagnostics."""
     started = perf_counter()
     try:
         return fn()
@@ -154,6 +159,7 @@ def timed_call(label: str, fn):
 
 
 def _stream_chunk(text: str, *, punctuation_pause: float = 0.08):
+    """Yield streamed text tokens with punctuation-aware pacing."""
     words = text.split(" ")
     for idx, word in enumerate(words):
         token = word
@@ -169,6 +175,7 @@ def _stream_chunk(text: str, *, punctuation_pause: float = 0.08):
 
 
 def run_progress_expander(steps: List[Dict[str, str]], runner):
+    """Run task while updating a single progress expander."""
     placeholder = st.empty()
 
     def push(title: str, _msg: str = "") -> None:
@@ -188,11 +195,13 @@ def run_progress_expander(steps: List[Dict[str, str]], runner):
 
 
 def normalize_label(value: str) -> str:
+    """Normalize free-text labels for robust matching."""
     txt = re.sub(r"\s+", " ", (value or "").strip().lower())
     return txt
 
 
 def parse_csv_labels(raw: str) -> List[str]:
+    """Parse comma-separated user input into unique normalized labels."""
     tokens = [normalize_label(tok) for tok in str(raw or "").split(",")]
     deduped: List[str] = []
     for tok in tokens:
@@ -202,6 +211,7 @@ def parse_csv_labels(raw: str) -> List[str]:
 
 
 def _is_valid_contribution(value: Any) -> bool:
+    """Validate contribution in admissible set {0} U [1, 100000]."""
     try:
         amount = float(value)
     except Exception:
@@ -212,6 +222,7 @@ def _is_valid_contribution(value: Any) -> bool:
 
 
 def short_save_summary(summary: Dict[str, Any]) -> str:
+    """Build compact summary string for save confirmation UI."""
     preferences = ", ".join(summary.get("diet") or []) or "—"
     allergens = ", ".join(summary.get("allergens") or []) or "none"
     hard_no = ", ".join(summary.get("hard_no") or []) or "none"
@@ -229,6 +240,7 @@ def ensure_questionnaire_state(
     player_id: str,
     selected_player: Dict[str, Any],
 ) -> str:
+    """Initialize per-participant questionnaire state on first visit."""
     state_key = f"{session_id}:{player_id}"
     current_key = str(st.session_state.get("aff_form_state_key", ""))
     if current_key != state_key:
@@ -1120,6 +1132,7 @@ def render_host_view(
 
 
 def main() -> None:
+    """Render the main cuisine questionnaire workflow."""
     apply_theme()
 
     page_started = perf_counter()
@@ -1137,18 +1150,24 @@ def main() -> None:
         st.error("⚠️ Erreur : connexion Notion indisponible.")
         st.stop()
     authenticator = get_authenticator(repo)
-    _, authentication_status, _ = ensure_auth(
+    authentication_status = sidebar_auth_controls(
         authenticator,
         callback=remember_access,
-        key="affranchis-cuisine-cookie-auth",
-        location="hidden",
+        key_prefix="affranchis-cuisine-auth",
+    )
+    sidebar_technical_debug(
+        page_label="03_Cuisine",
+        repo=repo,
+        extra={
+            "cache_bust_token": _cache_bust_token(),
+            "prefs_saved": bool(st.session_state.get("prefs_saved")),
+        },
     )
     if not authentication_status:
         st.warning("Please log in first.")
         if st.button("Go to Access", type="primary", use_container_width=True):
             st.switch_page("pages/02_Login.py")
         st.stop()
-    authenticator.logout(button_name="Se déconnecter", location="sidebar")
 
     try:
         players_db_id = (repo.players_db_id or "").strip() or secret_required(
