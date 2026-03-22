@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Literal, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, Literal, Optional
 
 import json
 
@@ -10,6 +11,7 @@ from config import settings
 
 
 def set_page() -> None:
+    """Apply default Streamlit page configuration for this app."""
     st.set_page_config(
         page_title=settings.app_title,
         page_icon="🪶",
@@ -20,6 +22,7 @@ def set_page() -> None:
 
 
 def apply_theme() -> None:
+    """Load shared CSS theme and inject accent-color override."""
     css_path = Path("assets/styles.css")
     if css_path.exists():
         css = css_path.read_text(encoding="utf-8")
@@ -28,28 +31,33 @@ def apply_theme() -> None:
 
 
 def heading(text: str) -> None:
+    """Render page heading with app typography class."""
     st.markdown(f"<h1 class='heading'>{text}</h1>", unsafe_allow_html=True)
 
 
 def microcopy(text: str) -> None:
+    """Render compact secondary copy text."""
     st.markdown(f"<p class='microcopy'>{text}</p>", unsafe_allow_html=True)
 
 
 def primary_button(
     label: str, key: Optional[str] = None, disabled: bool = False
 ) -> bool:
+    """Render standardized primary CTA button."""
     return st.button(
         label, key=key, type="primary", disabled=disabled, use_container_width=True
     )
 
 
 def small_button(label: str, key: Optional[str] = None, disabled: bool = False) -> bool:
+    """Render standardized secondary button."""
     return st.button(label, key=key, disabled=disabled, use_container_width=True)
 
 
 def card_block(
     image_url: Optional[str], concept_line: Optional[str], symbol: Optional[str]
 ) -> None:
+    """Render image/symbol/text card content block."""
     with st.container():
         if image_url:
             st.image(image_url, caption=None)
@@ -63,6 +71,7 @@ def card_block(
 
 @contextmanager
 def fade_container():
+    """Yield a container wrapped in the app fade-in shell class."""
     container = st.container()
     container.markdown("<div class='fade-in app-shell'>", unsafe_allow_html=True)
     with container:
@@ -289,6 +298,7 @@ def viz_block(
 
 
 def sidebar_debug_state() -> None:
+    """Render raw session-state debug panel when debug mode is enabled."""
     from infra.app_context import reset_notion_repo_cache
 
     if not settings.show_debug:
@@ -301,7 +311,77 @@ def sidebar_debug_state() -> None:
     # st.components.v1.html(html, height=size_px + 20, scrolling=False)
 
 
+def sidebar_auth_controls(
+    authenticator: Any,
+    *,
+    callback=None,
+    key_prefix: str = "sidebar-auth",
+) -> bool:
+    """Cookie-first auth gate with conditional sidebar controls."""
+    authenticator.login(
+        location="hidden",
+        key=f"{key_prefix}-cookie-only",
+        callback=callback,
+    )
+    auth_ok = bool(st.session_state.get("authentication_status"))
+    if auth_ok:
+        with st.sidebar:
+            st.markdown("### Session")
+            st.caption(
+                f"Connecté·e: {st.session_state.get('player_name') or st.session_state.get('name') or '—'}"
+            )
+        authenticator.logout(button_name="Se déconnecter", location="sidebar")
+        return True
+
+    with st.sidebar:
+        st.markdown("### Connexion")
+    authenticator.login(
+        location="sidebar",
+        key=f"{key_prefix}-login-form",
+        callback=callback,
+    )
+    return bool(st.session_state.get("authentication_status"))
+
+
+def sidebar_technical_debug(
+    *,
+    page_label: str,
+    repo: Optional[Any] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Systematic technical context panel for operational debugging."""
+    db_ids: Dict[str, str] = {}
+    if repo is not None:
+        db_ids = {
+            "sessions": str(getattr(repo, "session_db_id", "") or ""),
+            "players": str(getattr(repo, "players_db_id", "") or ""),
+            "questions": str(getattr(repo, "questions_db_id", "") or ""),
+            "responses": str(getattr(repo, "responses_db_id", "") or ""),
+            "decisions": str(getattr(repo, "decisions_db_id", "") or ""),
+        }
+
+    base_payload: Dict[str, Any] = {
+        "at_utc": datetime.now(timezone.utc).isoformat(),
+        "page": page_label,
+        "authentication_status": bool(st.session_state.get("authentication_status")),
+        "player_page_id": str(st.session_state.get("player_page_id") or ""),
+        "player_name": str(st.session_state.get("player_name") or ""),
+        "player_role": str(st.session_state.get("player_role") or ""),
+        "session_id": str(st.session_state.get("session_id") or ""),
+        "session_title": str(st.session_state.get("session_title") or ""),
+        "repo_ready": repo is not None,
+        "db_ids": db_ids,
+    }
+    if extra:
+        base_payload.update(extra)
+
+    with st.sidebar:
+        with st.expander("Debug · Contexte technique", expanded=False):
+            st.json(base_payload, expanded=False)
+
+
 def morph3_defaults() -> dict:
+    """Return default parameters for the morph3 visual block."""
     return {
         "canvas_width": 900,
         "canvas_height": 520,
