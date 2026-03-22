@@ -425,7 +425,12 @@ def main() -> None:
     m5, m6 = st.columns(2)
     m5.metric("Contribution avg (EUR)", float(summary.get("contribution_avg", 0.0)))
     m6.metric("Contribution median (EUR)", float(summary.get("contribution_median", 0.0)))
-    with st.expander("Debug · Aggregation internals", expanded=False):
+    with st.expander(
+        "Debug · Aggregation internals",
+        expanded=False,
+        key="overview-aggregation-debug-expander",
+        on_change="rerun",
+    ):
         st.json(
             {
                 "session_id": summary.get("session_id"),

@@ -52,7 +52,7 @@ def _build_mint_result(
 def _render_access_cta() -> None:
     display_centered_prompt("Access")
     if st.button("Voir l’Idée", use_container_width=False, key="splash-go-idee"):
-        st.switch_page("app.py")
+        st.switch_page("pages/00_Idee.py")
     st.markdown("### This session ...")
     st.markdown("## Each player enters using a unique access key.")
 

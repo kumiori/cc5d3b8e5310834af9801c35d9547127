@@ -376,7 +376,12 @@ def sidebar_technical_debug(
         base_payload.update(extra)
 
     with st.sidebar:
-        with st.expander("Debug · Contexte technique", expanded=False):
+        with st.expander(
+            "Debug · Contexte technique",
+            expanded=False,
+            key=f"sidebar-tech-debug-{page_label}",
+            on_change="rerun",
+        ):
             st.json(base_payload, expanded=False)
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -9,6 +11,17 @@ import streamlit.components.v1 as components
 
 from infra.app_context import get_authenticator, get_notion_repo
 from infra.app_state import ensure_auth, ensure_session_context, ensure_session_state, remember_access
+from infra.notion_repo import _execute_with_retry, _resolve_data_source_id, get_database_schema
+from services.notion_value_utils import (
+    find_exact_prop,
+    parse_json_text,
+    parse_number,
+    read_number,
+    read_relation_first,
+    read_rich_text,
+    read_title,
+)
+from services.session_catalog import list_sessions_for_ui
 from services.sumup_client import SumUpClient, build_tx_stats, parse_metadata_text
 from ui import apply_theme, set_page
 
@@ -105,7 +118,7 @@ def _extract_history_items(payload: Any) -> List[Dict[str, Any]]:
 
 def _json_text(value: Any) -> str:
     try:
-        return str(value) if isinstance(value, str) else __import__("json").dumps(value, ensure_ascii=False)
+        return str(value) if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     except Exception:
         return str(value)
 
@@ -134,6 +147,134 @@ def _to_table_rows(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             }
         )
     return rows
+
+
+def _is_affranchis_tx(item: Dict[str, Any]) -> bool:
+    """Identify Affranchis transactions from metadata/reference/summary markers."""
+    metadata = item.get("metadata")
+    metadata_blob = _json_text(metadata).lower()
+    if '"app_tag":"affranchis"' in metadata_blob or "'app_tag': 'affranchis'" in metadata_blob:
+        return True
+    reference = str(item.get("transaction_code") or item.get("checkout_reference") or "").lower()
+    if reference.startswith("affr-") or reference.startswith("aff-"):
+        return True
+    summary = str(item.get("product_summary") or item.get("description") or "").lower()
+    if "affranchis" in summary:
+        return True
+    return False
+
+
+def _load_responses_for_session(repo: Any, session_id: str) -> List[Dict[str, Any]]:
+    """Load normalized response rows for one session from responses DB."""
+    responses_db_id = str(getattr(repo, "responses_db_id", "") or "")
+    if not responses_db_id:
+        return []
+    ds_id = _resolve_data_source_id(repo.client, responses_db_id)
+    if not ds_id:
+        return []
+    schema = get_database_schema(repo.client, responses_db_id)
+    session_prop = find_exact_prop(schema, ["session"], "relation")
+    player_prop = find_exact_prop(schema, ["player"], "relation")
+    question_rel_prop = find_exact_prop(schema, ["question", "statement"], "relation")
+    question_id_prop = find_exact_prop(schema, ["question_id"], "rich_text")
+    item_id_prop = find_exact_prop(schema, ["item_id"], "rich_text")
+    value_prop = find_exact_prop(schema, ["value"], "rich_text")
+    value_number_prop = find_exact_prop(schema, ["value_number"], "number")
+    title_prop = find_exact_prop(schema, ["Name"], "title")
+
+    query: Dict[str, Any] = {
+        "data_source_id": ds_id,
+        "sorts": [{"timestamp": "created_time", "direction": "descending"}],
+        "page_size": 100,
+    }
+    if session_prop:
+        query["filter"] = {"property": session_prop, "relation": {"contains": session_id}}
+    out: List[Dict[str, Any]] = []
+    while True:
+        payload = _execute_with_retry(repo.client.data_sources.query, **query)
+        for page in payload.get("results", []):
+            props = page.get("properties", {}) if isinstance(page, dict) else {}
+            qid = (
+                read_relation_first(props, question_rel_prop)
+                or read_rich_text(props, question_id_prop)
+                or read_rich_text(props, item_id_prop)
+            )
+            title_text = read_title(props, title_prop)
+            if not qid and title_text:
+                mq = re.search(r"Q:([0-9a-fA-F-]{16,40})", title_text)
+                if mq:
+                    qid = mq.group(1)
+            player_id = read_relation_first(props, player_prop)
+            if not player_id and title_text:
+                mp = re.search(r"P:([0-9a-fA-F-]{16,40})", title_text)
+                if mp:
+                    player_id = mp.group(1)
+            out.append(
+                {
+                    "id": str(page.get("id") or ""),
+                    "player_id": player_id,
+                    "question_id": qid,
+                    "value": parse_json_text(read_rich_text(props, value_prop)),
+                    "value_number": read_number(props, value_number_prop) if value_number_prop else None,
+                    "created_at": str(page.get("created_time") or ""),
+                    "title_key": title_text,
+                }
+            )
+        if not payload.get("has_more"):
+            break
+        query["start_cursor"] = payload.get("next_cursor")
+    return out
+
+
+def _latest_by_player_question(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Return latest response per player/question."""
+    latest: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in sorted(rows, key=lambda x: str(x.get("created_at") or ""), reverse=True):
+        pid = str(row.get("player_id") or "")
+        qid = str(row.get("question_id") or "")
+        if not pid or not qid:
+            continue
+        latest.setdefault(pid, {})
+        if qid not in latest[pid]:
+            latest[pid][qid] = row
+    return latest
+
+
+def _contribution_qids(questions: List[Dict[str, Any]]) -> List[str]:
+    """Extract likely contribution question IDs."""
+    qids: List[str] = []
+    for q in questions:
+        text = str(q.get("text") or "").lower()
+        if "contribution" in text:
+            qid = str(q.get("id") or "")
+            if qid:
+                qids.append(qid)
+    return qids
+
+
+def _projected_contribution_for_session(repo: Any, session_id: str) -> float:
+    """Compute projected total contribution from latest participant responses."""
+    questions = repo.list_questions(session_id)
+    contribution_ids = _contribution_qids(questions)
+    if not contribution_ids:
+        contribution_ids = ["contribution", "economic_contribution"]
+    responses = _load_responses_for_session(repo, session_id)
+    latest = _latest_by_player_question(responses)
+    total = 0.0
+    for _, qmap in latest.items():
+        amount = None
+        for qid in contribution_ids:
+            row = qmap.get(qid)
+            if not row:
+                continue
+            amount = parse_number(row.get("value_number"))
+            if amount is None:
+                amount = parse_number(row.get("value"))
+            if amount is not None:
+                break
+        if amount is not None:
+            total += float(amount)
+    return round(total, 2)
 
 
 def _extract_checkout_payment_link(checkout_payload: Any) -> str:
@@ -171,7 +312,7 @@ def _sumup_execute_dialog(checkout_id: str) -> None:
                     id: "sumup-card",
                     checkoutId: "{checkout_id}",
                     donateSubmitButton: false,
-                    showInstallments: true,
+                    showInstallments: false,
                     onResponse: function (type, body) {{
                         console.log("SumUp onResponse type:", type);
                         console.log("SumUp onResponse body:", body);
@@ -289,6 +430,11 @@ def main() -> None:
                 else:
                     st.error(f"Details request failed: {result.get('error')}")
 
+    tx_details_now = st.session_state.get("_sumup_tx_details")
+    if tx_details_now is not None:
+        st.markdown("#### Latest fetched transaction details")
+        st.json(tx_details_now, expanded=False)
+
     st.subheader("Create checkout test (custom metadata)")
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -296,12 +442,12 @@ def main() -> None:
     with c2:
         checkout_currency = st.text_input("Currency", value="EUR")
     with c3:
-        checkout_ref = st.text_input("Checkout reference", value=f"affranchis-{int(datetime.now().timestamp())}")
+        checkout_ref = st.text_input("Checkout reference", value=f"affr-{int(datetime.now().timestamp())}")
     checkout_description = st.text_input("Description", value="Affranchis transparency test checkout")
     checkout_return_url = st.text_input("Return URL (optional)", value="")
     metadata_text = st.text_area(
         "Metadata JSON",
-        value='{"source":"test_txs","purpose":"debug","pool":"transparency"}',
+        value='{"app_tag":"affranchis","source":"test_txs","purpose":"debug","pool":"transparency"}',
         help="JSON object that will be sent to SumUp as checkout metadata.",
     )
     if st.button("4) Create checkout", type="primary", use_container_width=True):
@@ -310,6 +456,9 @@ def main() -> None:
         except ValueError as exc:
             st.error(str(exc))
         else:
+            metadata.setdefault("app_tag", "affranchis")
+            metadata.setdefault("source", "test_txs")
+            metadata.setdefault("pool", "transparency")
             with st.spinner("Creating checkout..."):
                 result = client.create_checkout(
                     amount=float(checkout_amount),
@@ -427,6 +576,58 @@ def main() -> None:
 
         items = _extract_history_items(history_payload)
         if items:
+            aff_items = [item for item in items if _is_affranchis_tx(item)]
+            st.markdown("#### Affranchis-only transactions")
+            st.caption(f"Detected in history: {len(aff_items)} / {len(items)}")
+            if aff_items:
+                aff_df = pd.DataFrame(_to_table_rows(aff_items))
+                st.dataframe(aff_df, use_container_width=True, hide_index=True)
+
+                aff_success = [
+                    item
+                    for item in aff_items
+                    if str(item.get("status") or "").upper() in {"SUCCESSFUL", "PAID"}
+                ]
+                aff_ts_rows: List[Dict[str, Any]] = []
+                for item in aff_success:
+                    ts = str(item.get("timestamp") or "")
+                    amount = parse_number(item.get("amount"))
+                    if not ts or amount is None:
+                        continue
+                    aff_ts_rows.append({"timestamp": ts, "amount": float(amount)})
+                if aff_ts_rows:
+                    ts_df = pd.DataFrame(aff_ts_rows)
+                    ts_df["timestamp"] = pd.to_datetime(ts_df["timestamp"], utc=True, errors="coerce")
+                    ts_df = ts_df.dropna(subset=["timestamp"]).sort_values("timestamp")
+                    ts_df["cumulative_collected_eur"] = ts_df["amount"].cumsum()
+                    st.line_chart(
+                        ts_df.set_index("timestamp")[["amount", "cumulative_collected_eur"]],
+                        use_container_width=True,
+                    )
+
+                    sessions = list_sessions_for_ui(repo, limit=300)
+                    session_ids = [str(s.get("id") or "") for s in sessions if s.get("id")]
+                    selected_session_id = st.selectbox(
+                        "Session pour comparer projection vs collecte",
+                        options=session_ids,
+                        format_func=lambda sid: next(
+                            (str(s.get("label") or s.get("session_code") or sid[:8]) for s in sessions if s.get("id") == sid),
+                            sid,
+                        ),
+                        key="sumup-reconcile-session",
+                    )
+                    projected = _projected_contribution_for_session(repo, selected_session_id) if selected_session_id else 0.0
+                    collected = float(ts_df["amount"].sum())
+                    ratio = (collected / projected) if projected > 0 else 0.0
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Projection (EUR)", round(projected, 2))
+                    r2.metric("Collecté concilié (EUR)", round(collected, 2))
+                    r3.metric("Ratio collecté/projeté", round(ratio, 3))
+                else:
+                    st.info("No successful Affranchis transactions with timestamps found yet.")
+            else:
+                st.info("No Affranchis-tagged transactions detected in fetched history.")
+
             search_text = st.text_input(
                 "Filter pooled transactions (id/reference/metadata/status text search)",
                 value="",

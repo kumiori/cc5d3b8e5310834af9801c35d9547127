@@ -78,7 +78,12 @@ def render_sidebar_operational_context(
             f"Actifs 12h: {player_summary.get('active_12h', 0)} · "
             f"Scans doublons: {system_summary.get('duplicate_scan_runs', 0)}"
         )
-        with st.expander("Timing traces", expanded=False):
+        with st.expander(
+            "Timing traces",
+            expanded=False,
+            key="admin-timing-traces-expander",
+            on_change="rerun",
+        ):
             traces = st.session_state.get("_admin_timing_traces", [])
             if not traces:
                 st.caption("Aucune trace pour le moment.")

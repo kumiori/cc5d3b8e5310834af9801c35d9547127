@@ -1,24 +1,23 @@
 from __future__ import annotations
 
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
 from infra.app_context import get_authenticator, get_notion_repo
 from infra.app_state import ensure_session_state, remember_access
-from infra.notion_repo import _execute_with_retry, _resolve_data_source_id, get_database_schema
-from services.notion_value_utils import (
-    find_prop,
-    read_relation_first,
-    read_rich_text,
-    read_title,
-)
+from repositories.player_repo import PlayerRepository
+from services.session_catalog import list_sessions_for_ui
 from ui import apply_theme, set_page, sidebar_technical_debug
 
 
 def _normalize(text: str) -> str:
     """Normalize user-entered text for matching."""
-    return " ".join(str(text or "").strip().lower().split())
+    raw = str(text or "").strip().lower()
+    raw = unicodedata.normalize("NFKD", raw)
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    return " ".join(raw.split())
 
 
 def _mask_email(email: str) -> str:
@@ -42,71 +41,28 @@ def _mask_key_suffix(access_key: str, size: int = 4) -> str:
 
 def _load_sessions_map(repo: Any) -> Dict[str, str]:
     """Load session id -> session code map for display/disambiguation."""
-    out: Dict[str, str] = {}
-    try:
-        for row in repo.list_sessions(limit=300):
-            sid = str(row.get("id") or "")
-            if sid:
-                out[sid] = str(row.get("session_code") or sid[:8])
-    except Exception:
-        pass
-    return out
+    return {
+        str(row.get("id") or ""): str(row.get("label") or row.get("session_code") or "session")
+        for row in list_sessions_for_ui(repo, limit=300)
+        if row.get("id")
+    }
 
 
 def _load_players_for_recovery(repo: Any, *, limit: int = 500) -> List[Dict[str, Any]]:
     """Load player rows with fields useful for recovery scoring."""
-    players_db_id = str(getattr(repo, "players_db_id", "") or "")
-    if not players_db_id:
-        return []
-    ds_id = _resolve_data_source_id(repo.client, players_db_id)
-    if not ds_id:
-        return []
-    schema = get_database_schema(repo.client, players_db_id)
-    name_rt_prop = find_prop(schema, "nickname", "rich_text")
-    name_title_prop = find_prop(schema, "Name", "title")
-    key_prop = find_prop(schema, "access_key", "rich_text")
-    email_prop = find_prop(schema, "email", "email")
-    email_rt_prop = find_prop(schema, "email", "rich_text")
-    session_prop = find_prop(schema, "session", "relation")
-
-    query: Dict[str, Any] = {"data_source_id": ds_id, "page_size": min(100, max(1, limit))}
+    rows = PlayerRepository(repo).list_all_players(limit=limit)
     out: List[Dict[str, Any]] = []
-    while True:
-        payload = _execute_with_retry(repo.client.data_sources.query, **query)
-        for page in payload.get("results", []):
-            props = page.get("properties", {}) if isinstance(page, dict) else {}
-            email_val = ""
-            email_raw = props.get(email_prop)
-            if isinstance(email_raw, dict) and email_raw.get("type") == "email":
-                email_val = str(email_raw.get("email") or "")
-            if not email_val:
-                email_val = read_rich_text(props, email_rt_prop)
-            session_ids: List[str] = []
-            rel_first = read_relation_first(props, session_prop)
-            if rel_first:
-                session_ids.append(rel_first)
-            rel_raw = props.get(session_prop)
-            if isinstance(rel_raw, dict) and rel_raw.get("type") == "relation":
-                for item in rel_raw.get("relation", []):
-                    if isinstance(item, dict) and item.get("id"):
-                        sid = str(item.get("id") or "")
-                        if sid and sid not in session_ids:
-                            session_ids.append(sid)
-            out.append(
-                {
-                    "id": str(page.get("id") or ""),
-                    "nickname": read_rich_text(props, name_rt_prop)
-                    or read_title(props, name_title_prop)
-                    or "participant",
-                    "email": email_val.strip(),
-                    "access_key": read_rich_text(props, key_prop).strip(),
-                    "session_ids": session_ids,
-                }
-            )
-        if not payload.get("has_more") or len(out) >= limit:
-            break
-        query["start_cursor"] = payload.get("next_cursor")
-    return out[:limit]
+    for row in rows:
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "nickname": str(row.get("nickname") or "participant"),
+                "email": str(row.get("email") or "").strip(),
+                "access_key": str(row.get("access_key") or "").strip(),
+                "session_ids": list(row.get("session_ids", []) or []),
+            }
+        )
+    return out
 
 
 def _score_candidate(
@@ -238,8 +194,24 @@ def main() -> None:
                 )
             st.session_state["_recovery_candidates"] = candidates
             st.session_state["_recovery_selected_id"] = ""
+            st.session_state["_recovery_search_ran"] = True
+            st.session_state["_recovery_search_count_players"] = len(players)
+            st.session_state["_recovery_search_count_candidates"] = len(candidates)
+            if candidates:
+                st.success(f"{len(candidates)} accès possible(s) trouvé(s).")
+            else:
+                st.warning(
+                    "Aucun accès trouvé avec ces informations. "
+                    "Essaie avec l’e-mail exact, un autre nom, ou la fin de clé."
+                )
 
     candidates = st.session_state.get("_recovery_candidates", [])
+    if st.session_state.get("_recovery_search_ran") and not candidates:
+        st.caption(
+            f"Recherche effectuée sur "
+            f"{int(st.session_state.get('_recovery_search_count_players') or 0)} profil(s), "
+            f"0 correspondance."
+        )
     if candidates:
         st.markdown("### Accès possibles")
         st.caption("Les résultats sont masqués. Choisis la ligne qui te correspond.")

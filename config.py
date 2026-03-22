@@ -23,6 +23,12 @@ class Settings:
     show_debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     app_title: str = os.getenv("APP_TITLE", "Les Affranchi·e·s")
     accent_color: str = os.getenv("ACCENT_COLOR", "#1f1f1f")
+    app_env: str = os.getenv("APP_ENV", os.getenv("ENVIRONMENT", "development"))
+
+    @property
+    def is_production(self) -> bool:
+        env = str(self.app_env or "").strip().lower()
+        return env in {"prod", "production", "live"}
 
 
 settings = Settings()

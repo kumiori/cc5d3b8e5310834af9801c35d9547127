@@ -1,49 +1,88 @@
 from __future__ import annotations
 
-from ui import (
-    apply_theme,
-    display_centered_prompt,
-    microcopy,
-    render_info_block,
-    set_page,
-    sidebar_debug_state,
-)
-
 import streamlit as st
+
+from config import settings
+
+
+def _visibility(internal: bool) -> str:
+    """Hide internal/testing pages from navigation in production only."""
+    if settings.is_production and internal:
+        return "hidden"
+    return "visible"
 
 
 def main() -> None:
-    set_page()
-    apply_theme()
-    sidebar_debug_state()
-
-    display_centered_prompt("Les Affranchi·e·s")
-    st.markdown(
-        """
-### Les Affranchi·e·s est un collectif créé en 2024 pour réunir des personnes qui se disent _affranchies du pouvoir_ et des _rapports de pouvoir dominants_, et qui s’efforcent de les traverser avec vertu, détachement et discernement.
-"""
-    )
-    st.divider()
-
-    render_info_block(
-        left_title="L'Idée",
-        left_subtitle="",
-        right_content=(
-            "Créer un réseau d’entraide : lorsqu’on reconnaît un·e Affranchi·e, "
-            "on sait qu’il ou elle est digne de confiance, fiable, et non mû·e "
-            "par des dynamiques de domination."
-        ),
-    )
-
-    st.markdown(
-        """
-### Nous organisons des rencontres, des événements, des discussions, des projets collectifs, et nous nous soutenons les un·e·s les autres dans nos entreprises respectives.
-"""
-    )
-    microcopy("Une forme-plate pour se reconnaître, se relier, et agir.")
-
-    if st.button("Retour au lobby", type="primary", use_container_width=True):
-        st.switch_page("pages/04_Home.py")
+    """Application router based on explicit Streamlit navigation."""
+    pages = {
+        "Entrée": [
+            st.Page(
+                "pages/00_Idee.py",
+                title="L'Idée",
+                icon="🪶",
+                default=True,
+                url_path="idee",
+            ),
+            st.Page("pages/01_Splash.py", title="Splash", icon="✨", url_path="splash"),
+            st.Page("pages/02_Login.py", title="Login", icon="🔑", url_path="login"),
+            st.Page(
+                "pages/10_Access.py",
+                title="Access (legacy)",
+                icon="🧪",
+                url_path="access-legacy",
+                visibility=_visibility(True),
+            ),
+        ],
+        "Session": [
+            st.Page("pages/04_Home.py", title="Lobby", icon="🏠", url_path="home"),
+            st.Page("pages/03_Cuisine.py", title="Cuisine", icon="🍲", url_path="cuisine"),
+            st.Page(
+                "pages/09_Participant.py",
+                title="Participant",
+                icon="🧾",
+                url_path="participant",
+            ),
+            st.Page(
+                "pages/08_Overview.py",
+                title="Overview",
+                icon="📊",
+                url_path="overview",
+            ),
+        ],
+        "Ops": [
+            st.Page("pages/07_Admin.py", title="Admin", icon="🛠️", url_path="admin"),
+            st.Page(
+                "pages/test_key_recovery.py",
+                title="Test · Recovery",
+                icon="🧪",
+                url_path="test-key-recovery",
+                visibility=_visibility(True),
+            ),
+            st.Page(
+                "pages/test_txs.py",
+                title="Test · Transactions",
+                icon="🧪",
+                url_path="test-txs",
+                visibility=_visibility(True),
+            ),
+            st.Page(
+                "pages/test_access_keys.py",
+                title="Test · Access keys",
+                icon="🧪",
+                url_path="test-access-keys",
+                visibility=_visibility(True),
+            ),
+            st.Page(
+                "pages/40_affranchis_cuisine_test.py",
+                title="Test · Cuisine legacy",
+                icon="🧪",
+                url_path="test-cuisine-legacy",
+                visibility=_visibility(True),
+            ),
+        ],
+    }
+    router = st.navigation(pages, position="sidebar", expanded=False)
+    router.run()
 
 
 if __name__ == "__main__":

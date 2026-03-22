@@ -691,7 +691,12 @@ def main() -> None:
         audio_path = _audio_path_from_payload(latest_audio)
         if audio_path and Path(audio_path).exists():
             st.audio(audio_path)
-        with st.expander("Historique des notes audio", expanded=False):
+        with st.expander(
+            "Historique des notes audio",
+            expanded=False,
+            key="participant-audio-history-expander",
+            on_change="rerun",
+        ):
             for idx, note in enumerate(audio_notes, start=1):
                 payload = note.get("payload", {})
                 path = _audio_path_from_payload(payload)
@@ -784,6 +789,8 @@ def main() -> None:
                 else:
                     ref = f"aff-{session_id[:8]}-{player_page_id[:8]}-{int(datetime.now().timestamp())}"
                     metadata = {
+                        "app_tag": "affranchis",
+                        "flow": "participant_contribution",
                         "participant_key": st.session_state.get(
                             "player_access_key", ""
                         ),
