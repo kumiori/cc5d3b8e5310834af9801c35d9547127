@@ -5,7 +5,6 @@ import time
 from typing import Any, Dict
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from infra.app_context import get_authenticator, get_notion_repo
 from infra.app_state import ensure_session_state, remember_access
@@ -107,6 +106,7 @@ def _render_access_cta() -> None:
             key="splash-go-login",
         ):
             st.session_state[ACCESS_SHOW_LOGIN_FORM] = True
+            st.rerun()
 
     with col_create:
         st.markdown("## Créer une clé")
@@ -128,7 +128,9 @@ def _render_access_cta() -> None:
 
 
 def _render_login_panel(authenticator: Any) -> None:
-    if st.session_state.get(MINT_RESULT_KEY):
+    if st.session_state.get(MINT_RESULT_KEY) and not bool(
+        st.session_state.get(ACCESS_SHOW_LOGIN_FORM, False)
+    ):
         return
     if not bool(st.session_state.get(ACCESS_SHOW_LOGIN_FORM, False)):
         return
@@ -291,6 +293,7 @@ def _render_mint_result(authenticator: Any) -> None:
                 st.session_state["login_access_key_prefill_notice"] = (
                     "Connexion automatique indisponible. Ta clé emoji-4 est préremplie."
                 )
+                st.session_state[MINT_RESULT_KEY] = None
                 st.session_state[ACCESS_SHOW_LOGIN_FORM] = True
                 st.error("Impossible de te connecter automatiquement. Entre la clé.")
                 st.rerun()
@@ -301,17 +304,9 @@ def _render_mint_result(authenticator: Any) -> None:
             key="access-mint-copy-btn",
             type="secondary" if key_copied else "primary",
         ):
-            key_text = (
-                str(mint_result.get("access_key", ""))
-                .replace("\\", "\\\\")
-                .replace("'", "\\'")
-            )
-            components.html(
-                f"<script>navigator.clipboard.writeText('{key_text}');</script>",
-                height=0,
-            )
             st.session_state["access_mint_key_copied"] = True
-            st.toast("Clé copiée.")
+            st.toast("Clé prête. Copie-la dans le bloc ci-dessous.")
+            st.code(str(mint_result.get("access_key", "")), language="text")
 
 
 def main() -> None:

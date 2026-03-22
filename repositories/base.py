@@ -20,3 +20,7 @@ class InteractionRepository(ABC):
     @abstractmethod
     def get_responses(self, session_id: str) -> List[Dict[str, Any]]:
         pass
+
+    @abstractmethod
+    def get_responses_by_item(self, session_id: str, item_id: str) -> List[Dict[str, Any]]:
+        pass

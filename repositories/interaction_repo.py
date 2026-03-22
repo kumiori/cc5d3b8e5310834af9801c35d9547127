@@ -163,6 +163,9 @@ class NotionInteractionRepository(InteractionRepository):
             next_cursor = payload.get("next_cursor")
         return out
 
+    def get_responses_by_item(self, session_id: str, item_id: str) -> List[Dict[str, Any]]:
+        return [row for row in self.get_responses(session_id) if str(row.get("item_id") or "") == item_id]
+
 
 class SQLiteInteractionRepository(InteractionRepository):
     def __init__(self, sqlite_path: str):
@@ -230,6 +233,36 @@ class SQLiteInteractionRepository(InteractionRepository):
                 ORDER BY created_at DESC
                 """,
                 (session_id,),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            raw = row["value_json"] or ""
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = raw
+            out.append(
+                {
+                    "session_id": row["session_id"],
+                    "player_id": row["player_id"],
+                    "item_id": row["item_id"],
+                    "value": parsed,
+                    "text_id": row["text_id"] or "",
+                    "created_at": row["created_at"],
+                }
+            )
+        return out
+
+    def get_responses_by_item(self, session_id: str, item_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, player_id, text_id, item_id, value_json, created_at
+                FROM responses
+                WHERE session_id = ? AND item_id = ?
+                ORDER BY created_at DESC
+                """,
+                (session_id, item_id),
             ).fetchall()
         out: List[Dict[str, Any]] = []
         for row in rows:

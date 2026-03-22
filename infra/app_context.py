@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any, Dict, Optional
 
 import streamlit as st
@@ -130,6 +131,12 @@ def get_auth_runtime_config() -> Dict[str, Any]:
     cookie_cfg = st.secrets.get("cookie", {})
 
     cookie_name = str(cookie_cfg.get("name", "")).strip()
+    sanitized_cookie_name = re.sub(r"[^A-Za-z0-9._-]", "_", cookie_name)
+    if sanitized_cookie_name != cookie_name:
+        st.warning(
+            "Nom de cookie ajusté automatiquement pour compatibilité navigateur."
+        )
+        cookie_name = sanitized_cookie_name
     cookie_key = str(cookie_cfg.get("key", "")).strip()
     expiry_raw = cookie_cfg.get("expiry_days")
     default_session_code = "GLOBAL-SESSION"

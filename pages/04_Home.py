@@ -50,6 +50,8 @@ def main() -> None:
     st.write("Navigation :")
     if st.button("L'Idée", use_container_width=True):
         st.switch_page("app.py")
+    if st.button("Administration", use_container_width=True):
+        st.switch_page("pages/07_Admin.py")
     if st.button("Préferences cuisine", use_container_width=True):
         st.switch_page("pages/03_Cuisine.py")
     if st.button(
@@ -63,11 +65,10 @@ def main() -> None:
     ):
         st.switch_page("pages/06_Coordination.py")
     if st.button(
-        "Tableau de bord (après dinêr, si affinités)",
-        disabled=True,
+        "Overview cuisine",
         use_container_width=True,
     ):
-        st.switch_page("pages/03_Resonance.py")
+        st.switch_page("pages/08_Overview.py")
 
     st.button("Pose une question", disabled=True, use_container_width=True)
     if st.session_state.get("authentication_status"):

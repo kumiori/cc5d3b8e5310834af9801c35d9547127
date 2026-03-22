@@ -1858,7 +1858,6 @@ def main() -> None:
                 if st.button("Revoir mes réponses", use_container_width=True):
                     st.session_state["aff_show_save_success_once"] = False
                     st.rerun()
-            st.session_state["aff_show_save_success_once"] = False
 
     if submit_now:
         if missing_items_all:
