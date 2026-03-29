@@ -207,3 +207,4 @@ __marimo__/
 
 .streamlit/secrets.toml
 **.pyc
+**.DS_Store

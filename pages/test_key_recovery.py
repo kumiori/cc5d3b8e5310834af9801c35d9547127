@@ -129,7 +129,7 @@ def main() -> None:
 
     repo = get_notion_repo()
     if not repo:
-        st.error("Connexion Notion indisponible.")
+        st.error("La connexion à la base n’est pas disponible pour le moment.")
         st.stop()
 
     authenticator = get_authenticator(repo)

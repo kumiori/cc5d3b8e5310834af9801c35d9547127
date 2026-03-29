@@ -297,6 +297,7 @@ def _extract_checkout_payment_link(checkout_payload: Any) -> str:
 def _sumup_execute_dialog(checkout_id: str) -> None:
     st.caption(
         "Embedded execution using SumUp Card SDK. "
+        "After payment, close this dialog manually because it will not close automatically. "
         "Widget callbacks are visible in browser console; server-side confirmation is done via API poll."
     )
     js_code = f"""
@@ -436,6 +437,13 @@ def main() -> None:
         st.json(tx_details_now, expanded=False)
 
     st.subheader("Create checkout test (custom metadata)")
+    auto_identity_metadata = {
+        "participant_key": str(st.session_state.get("player_access_key") or "").strip(),
+        "player_id": str(st.session_state.get("player_page_id") or "").strip(),
+        "session_id": str(st.session_state.get("session_id") or "").strip(),
+        "session_title": str(st.session_state.get("session_title") or "").strip(),
+    }
+    auto_identity_metadata = {k: v for k, v in auto_identity_metadata.items() if v}
     c1, c2, c3 = st.columns(3)
     with c1:
         checkout_amount = st.number_input("Amount", min_value=0.01, value=10.0, step=0.5)
@@ -447,9 +455,20 @@ def main() -> None:
     checkout_return_url = st.text_input("Return URL (optional)", value="")
     metadata_text = st.text_area(
         "Metadata JSON",
-        value='{"app_tag":"affranchis","source":"test_txs","purpose":"debug","pool":"transparency"}',
+        value=json.dumps(
+            {
+                "app_tag": "affranchis",
+                "source": "test_txs",
+                "purpose": "debug",
+                "pool": "transparency",
+                **auto_identity_metadata,
+            },
+            ensure_ascii=False,
+        ),
         help="JSON object that will be sent to SumUp as checkout metadata.",
     )
+    if auto_identity_metadata:
+        st.caption("Authenticated participant/session metadata will be attached automatically.")
     if st.button("4) Create checkout", type="primary", use_container_width=True):
         try:
             metadata = parse_metadata_text(metadata_text)
@@ -459,6 +478,8 @@ def main() -> None:
             metadata.setdefault("app_tag", "affranchis")
             metadata.setdefault("source", "test_txs")
             metadata.setdefault("pool", "transparency")
+            for key, value in auto_identity_metadata.items():
+                metadata.setdefault(key, value)
             with st.spinner("Creating checkout..."):
                 result = client.create_checkout(
                     amount=float(checkout_amount),

@@ -398,7 +398,7 @@ def main() -> None:
         },
     )
     if not authentication_status:
-        st.warning("Please log in first.")
+        st.info("Connecte-toi pour accéder à cet espace.")
         st.stop()
 
     render_admin_header()

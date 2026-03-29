@@ -41,7 +41,7 @@ def mint_anon_token(session_id: str, player_id: str, salt: str) -> str:
 
 def require_login() -> None:
     if not st.session_state.get("authentication_status"):
-        st.warning("Please log in first.")
+        st.info("Please sign in to continue.")
         st.stop()
 
 

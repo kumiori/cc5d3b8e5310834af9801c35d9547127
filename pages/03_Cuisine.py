@@ -1164,7 +1164,7 @@ def main() -> None:
         },
     )
     if not authentication_status:
-        st.warning("Please log in first.")
+        st.info("Connecte-toi quand tu veux pour continuer.")
         if st.button("Go to Access", type="primary", use_container_width=True):
             st.switch_page("pages/02_Login.py")
         st.stop()

@@ -375,7 +375,7 @@ def main() -> None:
         },
     )
     if not authentication_status:
-        st.warning("Please log in first.")
+        st.info("Connecte-toi pour consulter cette vue.")
         st.stop()
 
     st.title("Overview · Cuisine")

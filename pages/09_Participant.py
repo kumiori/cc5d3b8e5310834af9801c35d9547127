@@ -570,7 +570,10 @@ def _decision_type_for_storage(repo: Any) -> str:
 @st.dialog("Paiement SumUp")
 def _sumup_payment_dialog(checkout_id: str) -> None:
     """Render SumUp card dialog for an existing checkout id."""
-    st.caption("Finalise le paiement dans ce module sécurisé SumUp.")
+    st.caption(
+        "Finalise le paiement dans ce module sécurisé SumUp. "
+        "Après le paiement, ferme ce dialogue manuellement: il ne se fermera pas automatiquement."
+    )
     js_code = f"""
         <div id="sumup-card" style="min-height: 520px;"></div>
         <script type="text/javascript" src="https://gateway.sumup.com/gateway/ecom/card/v2/sdk.js"></script>
@@ -605,7 +608,7 @@ def main() -> None:
     ensure_session_state()
     repo = get_notion_repo()
     if not repo:
-        st.error("Connexion Notion indisponible.")
+        st.error("La connexion à la base n’est pas disponible pour le moment.")
         st.stop()
     authenticator = get_authenticator(repo)
     authentication_status = sidebar_auth_controls(
@@ -623,17 +626,17 @@ def main() -> None:
         },
     )
     if not authentication_status:
-        st.warning("Please log in first.")
+        st.info("Connecte-toi quand tu es prêt·e pour ouvrir cet espace.")
         st.stop()
 
     player_page_id = str(st.session_state.get("player_page_id") or "").strip()
     if not player_page_id:
-        st.error("Clé participant absente. Reconnecte-toi.")
+        st.error("Je ne retrouve pas encore ta clé sur cet appareil. Tu peux te reconnecter.")
         st.stop()
     session_id = str(st.session_state.get("session_id") or "").strip()
     session_label = str(st.session_state.get("session_title") or "Session")
     if not session_id:
-        st.error("Session introuvable.")
+        st.error("Je ne retrouve pas encore la session associée à cet accès.")
         st.stop()
 
     state = _resolve_participant_state(repo, session_id, player_page_id)

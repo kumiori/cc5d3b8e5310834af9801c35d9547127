@@ -37,10 +37,10 @@ def main() -> None:
             st.Page("pages/04_Home.py", title="Lobby", icon="🏠", url_path="home"),
             st.Page("pages/03_Cuisine.py", title="Cuisine", icon="🍲", url_path="cuisine"),
             st.Page(
-                "pages/09_Participant.py",
-                title="Participant",
+                "pages/09_Affranchie.py",
+                title="Affranchi·e",
                 icon="🧾",
-                url_path="participant",
+                url_path="affranchie",
             ),
             st.Page(
                 "pages/08_Overview.py",
@@ -51,6 +51,13 @@ def main() -> None:
         ],
         "Ops": [
             st.Page("pages/07_Admin.py", title="Admin", icon="🛠️", url_path="admin"),
+            st.Page(
+                "pages/09_Participant.py",
+                title="Test · Participant legacy",
+                icon="🧪",
+                url_path="test-participant-legacy",
+                visibility=_visibility(True),
+            ),
             st.Page(
                 "pages/test_key_recovery.py",
                 title="Test · Recovery",
