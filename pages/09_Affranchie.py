@@ -1475,12 +1475,19 @@ def main() -> None:
     authenticator.login(
         location="hidden", key="affranchie-auth", callback=remember_access
     )
-    ensure_session_context(repo)
     if not st.session_state.get("authentication_status"):
-        st.info("Connecte-toi quand tu es prêt·e, puis reviens ici.")
-        if st.button("Aller à la connexion", type="primary", use_container_width=True):
-            st.switch_page("pages/02_Login.py")
+        st.info("Reconnecte-toi ici pour retrouver ton espace.")
+        st.markdown("### Connexion")
+        _, authentication_status, _ = authenticator.login(
+            location="main",
+            key="affranchie-login-form",
+            callback=remember_access,
+        )
+        if authentication_status:
+            st.success("Accès validé.")
+            st.rerun()
         st.stop()
+    ensure_session_context(repo)
 
     player_page_id = str(st.session_state.get("player_page_id") or "").strip()
     session_id = str(st.session_state.get("session_id") or "").strip()
