@@ -52,6 +52,12 @@ def main() -> None:
         "Ops": [
             st.Page("pages/07_Admin.py", title="Admin", icon="🛠️", url_path="admin"),
             st.Page(
+                "pages/11_Treasury.py",
+                title="Treasury",
+                icon="💶",
+                url_path="treasury",
+            ),
+            st.Page(
                 "pages/09_Participant.py",
                 title="Test · Participant legacy",
                 icon="🧪",

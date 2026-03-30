@@ -202,6 +202,7 @@ def _resolve_state(repo: Any, session_id: str, player_page_id: str) -> Dict[str,
     player = _load_player_page(repo, player_page_id)
     questions = repo.list_questions(session_id)
     responses = _load_player_responses(repo, session_id, player_page_id)
+    aftercare_state = _load_aftercare_state(repo, session_id, player_page_id)
     latest = _latest_by_qid(responses)
 
     participation_qids = _question_ids(questions, "participation")
@@ -238,7 +239,15 @@ def _resolve_state(repo: Any, session_id: str, player_page_id: str) -> Dict[str,
         "contribution_qids": contribution_qids,
         "resolved": {
             "participation": participation,
+            "participation_confirmed": bool(
+                aftercare_state.get("participation_confirmed")
+            )
+            or any(latest.get(qid) for qid in participation_qids),
             "feedback_text": str(player.get("comment_text") or ""),
+            "feedback_acknowledged": bool(aftercare_state.get("feedback_acknowledged"))
+            or bool(str(player.get("comment_text") or "").strip()),
+            "feedback_text_present": bool(aftercare_state.get("feedback_text_present"))
+            or bool(str(player.get("comment_text") or "").strip()),
             "contribution_eur": contribution if contribution is not None else 0.0,
             "diet": ", ".join(player.get("diet", []) or []) or "—",
             "allergens": ", ".join(player.get("allergens", []) or []) or "—",
@@ -375,12 +384,20 @@ def _persist_aftercare_inputs(
         )
 
     feedback_enabled = bool(st.session_state.get("affranchie-feedback-enabled"))
-    if not feedback_enabled:
-        return
     feedback_text = str(
         st.session_state.get("affranchie-feedback-text") or resolved_feedback_text or ""
     )
-    _save_comment(repo, player_id, feedback_text)
+    if feedback_enabled:
+        _save_comment(repo, player_id, feedback_text)
+    _save_aftercare_state(
+        repo,
+        session_id=session_id,
+        player_id=player_id,
+        participation_confirmed=participation_choice in {"Oui", "Non"},
+        participation_value="oui" if participation_choice == "Oui" else "non",
+        feedback_acknowledged=True,
+        feedback_text=feedback_text if feedback_enabled else "",
+    )
 
 
 def _save_audio_note(
@@ -417,6 +434,66 @@ def _save_audio_note(
         decision_type=_decision_type_for_storage(repo),
         payload=json.dumps(payload, ensure_ascii=False),
     )
+
+
+def _save_aftercare_state(
+    repo: Any,
+    *,
+    session_id: str,
+    player_id: str,
+    participation_confirmed: bool,
+    participation_value: str,
+    feedback_acknowledged: bool,
+    feedback_text: str,
+) -> None:
+    """Persist the latest aftercare completion state for this participant and session."""
+    payload = {
+        "record_type": "aftercare_state",
+        "participant_key": st.session_state.get("player_access_key", ""),
+        "player_id": player_id,
+        "session_id": session_id,
+        "participation_confirmed": bool(participation_confirmed),
+        "participation_value": str(participation_value or ""),
+        "feedback_acknowledged": bool(feedback_acknowledged),
+        "feedback_text_present": bool(str(feedback_text or "").strip()),
+        "feedback_text": str(feedback_text or ""),
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    repo.create_decision(
+        session_id=session_id,
+        player_id=player_id,
+        decision_type=_decision_type_for_storage(repo),
+        payload=json.dumps(payload, ensure_ascii=False),
+    )
+
+
+def _load_aftercare_state(
+    repo: Any, session_id: str, player_id: str
+) -> Dict[str, Any]:
+    """Load the latest persisted aftercare state for this participant and session."""
+    rows = repo.list_decisions(session_id, decision_type=None)
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        pids = row.get("player_id") or []
+        if player_id not in pids:
+            continue
+        payload_raw = str(row.get("payload") or "")
+        try:
+            payload = json.loads(payload_raw) if payload_raw else {}
+        except Exception:
+            payload = {}
+        if str(payload.get("record_type") or "") != "aftercare_state":
+            continue
+        out.append(
+            {
+                "id": row.get("id"),
+                "created_at": row.get("created_at"),
+                "payload": payload,
+            }
+        )
+    out.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+    return out[0]["payload"] if out else {}
 
 
 def _load_audio_notes(
@@ -1508,7 +1585,17 @@ def main() -> None:
             else:
                 st.info(message)
 
-    st.session_state.setdefault("affranchie_step", "participation")
+    step_signature = f"{session_id}:{player_page_id}"
+    default_step = (
+        "contribution"
+        if bool(resolved.get("participation_confirmed"))
+        and bool(resolved.get("feedback_acknowledged"))
+        else "participation"
+    )
+    if st.session_state.get("affranchie_step_signature") != step_signature:
+        st.session_state["affranchie_step_signature"] = step_signature
+        st.session_state["affranchie_step"] = default_step
+    st.session_state.setdefault("affranchie_step", default_step)
     step = str(st.session_state.get("affranchie_step") or "participation")
     if step not in STEPS:
         step = "participation"
@@ -1570,6 +1657,31 @@ def main() -> None:
             if st.button("Enregistrer", use_container_width=True):
                 try:
                     _save_comment(repo, player_page_id, msg)
+                    participation_choice = str(
+                        st.session_state.get("affranchie-participation-choice")
+                        or ("Oui" if bool(resolved.get("participation")) else "Non")
+                    )
+                    participation_qids = list(state.get("participation_qids") or [])
+                    participation_qid = participation_qids[0] if participation_qids else ""
+                    _save_aftercare_state(
+                        repo,
+                        session_id=session_id,
+                        player_id=player_page_id,
+                        participation_confirmed=participation_choice in {"Oui", "Non"},
+                        participation_value="oui"
+                        if participation_choice == "Oui"
+                        else "non",
+                        feedback_acknowledged=True,
+                        feedback_text=msg,
+                    )
+                    if participation_qid and participation_choice in {"Oui", "Non"}:
+                        _upsert_response(
+                            repo,
+                            session_id,
+                            player_page_id,
+                            participation_qid,
+                            "oui" if participation_choice == "Oui" else "non",
+                        )
                     st.success("Message enregistré.")
                 except Exception as exc:
                     st.error(f"Échec enregistrement message: {exc}")
@@ -1622,8 +1734,13 @@ def main() -> None:
 
     else:
         st.subheader("Soutenir la session")
-        st.write("Si tu le souhaites, tu peux contribuer aux frais du dîner.")
-        st.caption("Chacun·e contribue selon ses moyens et son envie.")
+        if bool(resolved.get("participation_confirmed")):
+            st.info(f"Présence pour l’événement {session_label} déjà confirmée.")
+        if bool(resolved.get("feedback_acknowledged")):
+            if bool(resolved.get("feedback_text_present")):
+                st.info("Retour déjà enregistré.")
+            else:
+                st.info("Retour déjà enregistré (sans message).")
         proposed_amount = float(parse_number(resolved.get("contribution_eur")) or 0.0)
         st.session_state.setdefault("affranchie-contribution-amount", proposed_amount)
         default_mode = "Garder la proposition" if proposed_amount > 0 else "Changer"
@@ -1687,6 +1804,7 @@ def main() -> None:
         contribution_qid = contribution_qids[0] if contribution_qids else ""
         participation_qids = list(state.get("participation_qids") or [])
         participation_qid = participation_qids[0] if participation_qids else ""
+        current_attempt: Dict[str, Any] = {}
         if not is_confirmed:
             confirm_label = "Confirmer la contribution"
             if st.button(confirm_label, type="primary", use_container_width=True):
@@ -1747,7 +1865,7 @@ def main() -> None:
                 st.success(
                     "Une contribution pour ce montant a déjà été confirmée pour cette session."
                 )
-            else:
+            elif current_attempt:
                 st.caption(f"Statut actuel: {_status_fr(current_status or 'checkout_created')}")
 
             action_left, action_right = st.columns(2)
@@ -1810,7 +1928,7 @@ def main() -> None:
                         else:
                             st.success(
                                 f"Statut mis à jour: {_status_fr(str(verify_result.get('status') or 'pending'))}"
-                            )
+                        )
                     except Exception as exc:
                         _append_payment_trace(
                             "checkout_status_failed",
@@ -1818,7 +1936,6 @@ def main() -> None:
                             error=str(exc),
                         )
                         st.error(f"Vérification échouée: {exc}")
-
         attempts = _load_payment_attempts(repo, session_id, player_page_id)
         active_identity = _attempt_identity(current_attempt) if current_attempt else ""
         remaining_attempts = [
